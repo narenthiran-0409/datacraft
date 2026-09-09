@@ -40,7 +40,11 @@ export const ValidationWorkspaceView: React.FC<ValidationWorkspaceViewProps> = (
   isTriggering,
   actionError,
 }) => {
-  const datasetRuns = [...validationRuns].sort((a, b) => (a.id < b.id ? 1 : -1));
+  // BUG FIX (found via live E2E testing): this used to re-sort by (a.id < b.id ? 1 : -1),
+  // a lexicographic comparison of random UUIDs with no relationship to recency — it was
+  // silently scrambling the list. The backend already returns runs ordered by
+  // created_at DESC (app/modules/validation/service.py), so the fix is to stop re-sorting.
+  const datasetRuns = validationRuns;
 
   const hasActiveRun = datasetRuns.some((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
 

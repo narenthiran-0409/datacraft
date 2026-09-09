@@ -74,6 +74,7 @@ import {
   // Jobs
   cancelJob as apiCancelJob,
   // Review
+  createReview,
   listReviews,
   getReview,
   listReviewIssues,
@@ -161,7 +162,17 @@ function ScreenPrompt({ message }: { message: string }) {
 }
 
 function extractErrorMessage(err: unknown): string {
-  return err instanceof ApiError ? err.message : 'Something went wrong loading this screen.';
+  // BUG FIX (found via live E2E testing): this used to discard the message of any
+  // non-ApiError exception — including deliberate, specific, actionable errors thrown
+  // by this file's own action handlers (e.g. decideApproval's "No accepted/edited/
+  // corrected issues are known for this review in the current session..." message) —
+  // and replaced it with a generic, actively misleading "Something went wrong loading
+  // this screen," even when nothing was "loading" at all. A real user hit this via the
+  // realistic flow of switching users and going straight to Approval Center to decide,
+  // which left no useful clue about what had actually happened or what to do next.
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error && err.message) return err.message;
+  return 'Something went wrong loading this screen.';
 }
 
 /** Resolves which of {denied, loading, error, content} a gated real-data screen should show. */
@@ -374,6 +385,7 @@ export default function App() {
   const [validationDetailError, setValidationDetailError] = useState<string | null>(null);
   const [validationDetailActionError, setValidationDetailActionError] = useState<string | null>(null);
   const [isCancellingValidationJob, setIsCancellingValidationJob] = useState(false);
+  const [isStartingReview, setIsStartingReview] = useState(false);
 
   // Review & Corrections
   const [reviewRuns, setReviewRuns] = useState<ReviewRun[]>([]);
@@ -693,13 +705,24 @@ export default function App() {
     setLineageLoading(true);
     setLineageError(null);
 
-    getLineage('dataset', selectedDatasetId, 'both')
+    // BUG FIX (found via live E2E testing): this sent the entity type as lowercase
+    // ("dataset"), but app/modules/lineage/service.py compares it with plain equality
+    // against lineage_records.parent_entity_type/child_entity_type, which are always
+    // stored UPPERCASE (e.g. "DATASET", "VALIDATION_RUN" — confirmed directly in the
+    // platform DB) by every one of the 9 instrumentation touch points that call
+    // record_edge()/record_edges_bulk(). The mismatch meant get_edges_for_direction()
+    // found zero rows and 404'd — "no lineage" — for every dataset, even ones with
+    // real, correctly-recorded edges. Also lowercased entity_type on the way into
+    // local state below, since DataLineageView's own ENTITY_ICON/ENTITY_SCREEN maps
+    // are keyed lowercase and would otherwise silently miss every node (generic icon,
+    // no click-through) even once the request itself started succeeding.
+    getLineage('DATASET', selectedDatasetId, 'both')
       .then((graph) => {
         if (cancelled) return;
         setLineageNodes(
           graph.nodes.map((n) => ({
             id: `${n.entity_type}:${n.entity_id}`,
-            entityType: n.entity_type,
+            entityType: n.entity_type.toLowerCase(),
             entityId: n.entity_id,
             // The lineage endpoint returns only entity_type/entity_id — no display
             // name is resolvable from it, so the id itself (truncated) is shown.
@@ -1307,7 +1330,18 @@ export default function App() {
     triggerToast(`Synced "${target?.name}" successfully`);
   };
 
-  const handleCompleteAddSource = (input: NewDataSourceInput) => {
+  // database category: the data source + connection were already created for real
+  // inside AddDataSourceView, so there's nothing to add locally — just navigate back;
+  // the Data Sources screen's own fetch-on-navigate effect (Phase 1) picks it up.
+  // api/file categories have no real backend support, so they keep the old
+  // mock-only local append.
+  const handleCompleteAddSource = (input?: NewDataSourceInput) => {
+    if (!input) {
+      setCurrentScreen('data-sources');
+      triggerToast('Data source connected');
+      return;
+    }
+
     const newSource: DataSource = {
       id: `src-${Date.now()}`,
       name: input.name,
@@ -1541,8 +1575,25 @@ export default function App() {
   // ApprovalCenterView), and the backend independently enforces the same check.
   // The Approval Center UI (unchanged from mock) has no per-issue picker — it decides
   // an approval request as a whole, so every issue currently in its review run is sent.
-  // Fetched fresh here rather than relying on Review & Corrections' `issues` state,
-  // which may not be loaded if the user navigated straight to Approval Center.
+  //
+  // BUG FIX #2 (found during E2E testing, on top of the original fix below — the
+  // original fix relied ENTIRELY on this session's local `issues` state, which is
+  // hardcoded to finalValue: null on every fetch (IssueResponse carries no such
+  // field) — so simply revisiting Review & Corrections after deciding, or switching
+  // users and going straight to Approval Center (both realistic, and both exactly
+  // what this walkthrough's own steps do), left zero usable local state and made
+  // decide() fail on every attempt, not just a "known limitation" edge case).
+  // Fixed by ALSO fetching review suggestions fresh: decision_service.py's accept()
+  // and edit() are the ONLY two paths that ever set CorrectionSuggestion.is_selected
+  // = true (reject() never does), so that flag is a reliable, non-guessed signal for
+  // which suggestion-backed issues are genuinely in the approval's resolved scope —
+  // and it survives navigation, unlike local state. Combined (union) with the
+  // original local-state signal so same-session "decide then immediately submit"
+  // flows keep working for their one remaining blind spot: issues corrected
+  // DIRECTLY with no suggestion at all have no signal in any existing GET response
+  // (no corrections-list endpoint exists to add one, and this task doesn't add
+  // endpoints) — those still depend on local state and are only genuinely
+  // unrecoverable after a refresh, which the error message below states honestly.
   const decideApproval = async (
     id: string,
     comment: string,
@@ -1553,8 +1604,18 @@ export default function App() {
     try {
       const target = approvalQueue.find((r) => r.id === id);
       if (!target?.reviewRunId) throw new Error('Missing review run reference for this approval.');
-      const reviewIssues = await listReviewIssues(target.reviewRunId);
-      const updated = await decide(reviewIssues.map((i) => i.id));
+      const localInScopeIds = issues
+        .filter((i) => i.reviewRunId === target.reviewRunId && i.status === 'RESOLVED' && i.finalValue !== null)
+        .map((i) => i.id);
+      const suggestions = await listReviewSuggestions(target.reviewRunId);
+      const suggestionInScopeIds = suggestions.filter((s) => s.is_selected).map((s) => s.issue_id);
+      const inScopeIssueIds = Array.from(new Set([...localInScopeIds, ...suggestionInScopeIds]));
+      if (inScopeIssueIds.length === 0) {
+        throw new Error(
+          'No accepted or edited issues could be identified for this review — neither from suggestion records nor from this session\'s own recent decisions. Issues corrected directly with no suggestion cannot be identified for approval after a session refresh (no corrections-list endpoint exists to reconstruct that).'
+        );
+      }
+      const updated = await decide(inScopeIssueIds);
       setApprovalQueue((prev) =>
         prev.map((r) => (r.id === id ? mapApprovalRequest(updated, r.reviewRunName, r.datasetName, r.requestedBy) : r))
       );
@@ -1624,6 +1685,28 @@ export default function App() {
     }
   };
 
+  // BUG FIX (found via live E2E testing): createReview() already existed in client.ts
+  // but was never called from anywhere in the UI — a completed validation run with real
+  // failures had no way to reach Review & Corrections at all, since ReviewCorrectionsView
+  // only lists reviews that already exist (app/modules/review/service.py's
+  // create_from_validation_run requires an explicit POST /reviews). Wired here as the
+  // minimal fix: a "Start Review" action on a completed run's details page.
+  const handleStartReview = async () => {
+    if (!selectedValidationRun || selectedValidationRun.status !== 'COMPLETED') return;
+    setIsStartingReview(true);
+    setValidationDetailActionError(null);
+    try {
+      const created = await createReview({ validation_run_id: selectedValidationRun.id });
+      setSelectedReviewId(created.id);
+      handleNavigate('review-corrections');
+      triggerToast('Review started');
+    } catch (err) {
+      setValidationDetailActionError(extractErrorMessage(err));
+    } finally {
+      setIsStartingReview(false);
+    }
+  };
+
   // Staging & Publish Actions
   const handleCreateStagingRun = async () => {
     if (!selectedReviewId) return;
@@ -1652,7 +1735,16 @@ export default function App() {
     try {
       const trigger = await apiTriggerPublish(currentStagingRun.id, {
         target_type: 'FILE_EXPORT',
-        target_reference: `s3://datacraft-exports/${currentStagingRun.dataset_id}/attempt-${currentStagingRun.attempt_number}.csv`,
+        // BUG FIX (found via live E2E testing): this used to send a fake "s3://..."
+        // URI, but the real FILE_EXPORT writer (app/modules/publishing/file_export.py's
+        // resolve_target_path) treats target_reference as a plain path RELATIVE to
+        // PUBLISH_FILE_EXPORT_DIRECTORY on local disk — it explicitly rejects absolute
+        // paths, and a "scheme://" prefix isn't a relative path either (on Windows it
+        // parses as a malformed drive reference and the write fails outright with
+        // OSError: WinError 123; the backend's own tests use plain names like
+        // "out.jsonl"). Also corrected the extension: write_row_snapshots always
+        // writes JSONL (one JSON object per line), never CSV.
+        target_reference: `${currentStagingRun.dataset_id}/attempt-${currentStagingRun.attempt_number}.jsonl`,
       });
       const publishRun = await getPublishRun(trigger.publish_run_id);
       setCurrentPublishRun(publishRun);
@@ -1913,6 +2005,9 @@ export default function App() {
                 canCancel={hasPermission('discovery.run')}
                 isCancelling={isCancellingValidationJob}
                 onCancel={handleCancelValidationJob}
+                canStartReview={hasPermission('review.edit')}
+                isStartingReview={isStartingReview}
+                onStartReview={handleStartReview}
                 actionError={validationDetailActionError}
               />
             )}

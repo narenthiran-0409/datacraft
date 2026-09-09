@@ -361,7 +361,10 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
                         )}
                         {issue.confidence !== null && (
                           <span className="text-[11px] font-sans text-primary font-semibold">
-                            ({issue.confidence}% confidence)
+                            {/* BUG FIX (found via live E2E testing): the backend stores confidence as a
+                                0-1 fraction (e.g. 0.85 — see range_clamp.py), but this appended "%"
+                                straight to that raw value, showing "0.85% confidence" instead of "85%". */}
+                            ({Math.round(issue.confidence * 100)}% confidence)
                           </span>
                         )}
                         {issue.status !== 'PENDING' && issue.finalValue && (

@@ -1,4 +1,14 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import {
+  ApiError,
+  ConnectionTypeResponse,
+  createConnection,
+  createDataSource,
+  discoverConnection,
+  getJob,
+  listConnectionTypes,
+  testConnection,
+} from '../../api/client';
 
 export interface NewDataSourceInput {
   name: string;
@@ -9,19 +19,26 @@ export interface NewDataSourceInput {
 
 interface AddDataSourceViewProps {
   onBack: () => void;
-  onComplete: (source: NewDataSourceInput) => void;
+  // Database category creates the data source + connection for real inside this
+  // component and calls onComplete() with no argument. API/File categories have no
+  // real backend support (connection_types are database-only) and still produce a
+  // local-only mock entry via onComplete(input), unchanged from before.
+  onComplete: (source?: NewDataSourceInput) => void;
 }
 
 type Category = 'database' | 'api' | 'file';
 
-const DB_PROVIDERS = [
-  { id: 'postgresql', label: 'PostgreSQL', icon: 'database', defaultPort: '5432' },
-  { id: 'mysql', label: 'MySQL', icon: 'database', defaultPort: '3306' },
-  { id: 'snowflake', label: 'Snowflake', icon: 'ac_unit', defaultPort: '443' },
-  { id: 'bigquery', label: 'BigQuery', icon: 'hub', defaultPort: '443' },
-  { id: 'redshift', label: 'Redshift', icon: 'water', defaultPort: '5439' },
-  { id: 'mongodb', label: 'MongoDB', icon: 'data_object', defaultPort: '27017' },
-];
+// Real connection type codes -> a default port, since connection_types itself
+// carries no port. POSTGRESQL is the only one with a working test_connection/
+// discovery implementation today (see migration 0005's own comment) — the other
+// four are registered stubs that will honestly fail with a real error if tried.
+const DEFAULT_PORT_BY_CODE: Record<string, string> = {
+  POSTGRESQL: '5432',
+  SQL_SERVER: '1433',
+  MYSQL: '3306',
+  ORACLE: '1521',
+  SAP_HANA: '30015',
+};
 
 const CATEGORIES: { id: Category; label: string; icon: string; description: string }[] = [
   { id: 'database', label: 'Database', icon: 'database', description: 'PostgreSQL, MySQL, Snowflake, BigQuery, and more.' },
@@ -38,16 +55,26 @@ const STEPS = [
 export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, onComplete }) => {
   const [step, setStep] = useState(1);
   const [category, setCategory] = useState<Category>('database');
-  const [dbProvider, setDbProvider] = useState(DB_PROVIDERS[0]);
+  const [connectionTypes, setConnectionTypes] = useState<ConnectionTypeResponse[]>([]);
+  const [dbProvider, setDbProvider] = useState<ConnectionTypeResponse | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-  const [testAttempts, setTestAttempts] = useState(0);
+  const [testMessage, setTestMessage] = useState<string | null>(null);
   const [maxStepReached, setMaxStepReached] = useState(1);
+
+  // Real ids, populated once the data source + connection are created (database
+  // category only — see handleContinueFromDetails).
+  const [createdConnectionId, setCreatedConnectionId] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+
+  const [discoveryStatus, setDiscoveryStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
 
   const [connectionName, setConnectionName] = useState('');
   const [host, setHost] = useState('');
-  const [port, setPort] = useState(DB_PROVIDERS[0].defaultPort);
+  const [port, setPort] = useState('5432');
   const [dbName, setDbName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -56,6 +83,29 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
   const [filePath, setFilePath] = useState('');
 
   const categoryMeta = CATEGORIES.find((c) => c.id === category)!;
+
+  // Real connection types (POSTGRESQL/SQL_SERVER/MYSQL/ORACLE/SAP_HANA) replace the
+  // old hardcoded provider list, which included types (Snowflake, BigQuery, Redshift,
+  // MongoDB) that don't exist as real connection_types at all.
+  useEffect(() => {
+    if (category !== 'database') return;
+    let cancelled = false;
+    listConnectionTypes()
+      .then((types) => {
+        if (cancelled) return;
+        const active = types.filter((t) => t.is_active);
+        setConnectionTypes(active);
+        setDbProvider((prev) => prev ?? active.find((t) => t.code === 'POSTGRESQL') ?? active[0] ?? null);
+        const initial = active.find((t) => t.code === 'POSTGRESQL') ?? active[0];
+        if (initial) setPort(DEFAULT_PORT_BY_CODE[initial.code] ?? '5432');
+      })
+      .catch(() => {
+        if (!cancelled) setConnectionTypes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [category]);
 
   const canContinueFromDetails =
     connectionName.trim().length > 0 &&
@@ -71,9 +121,9 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
     }
   };
 
-  const handleSelectProvider = (provider: (typeof DB_PROVIDERS)[number]) => {
+  const handleSelectProvider = (provider: ConnectionTypeResponse) => {
     setDbProvider(provider);
-    setPort(provider.defaultPort);
+    setPort(DEFAULT_PORT_BY_CODE[provider.code] ?? '5432');
   };
 
   const handleContinueFromType = () => {
@@ -81,42 +131,114 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
     setMaxStepReached((m) => Math.max(m, 2));
   };
 
-  const handleTestConnection = () => {
-    setTestStatus('testing');
-    setTestAttempts((n) => n + 1);
-    // Mock network round-trip: fails occasionally on the first try to
-    // exercise the error/retry state, always succeeds after that.
-    const willFail = testAttempts === 0 && Math.random() < 0.25;
-    setTimeout(() => {
-      setTestStatus(willFail ? 'error' : 'success');
-    }, 1200);
+  // database category: creates the real DataSource + Connection (if not already
+  // created this session) on leaving step 2, since the real /connections/{id}/test
+  // endpoint requires the connection to already exist — the old mock tested before
+  // anything was "saved" at all, which the real API has no equivalent for.
+  const handleContinueFromDetails = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (category !== 'database') {
+      setStep(3);
+      setMaxStepReached((m) => Math.max(m, 3));
+      return;
+    }
+    if (createdConnectionId) {
+      setStep(3);
+      setMaxStepReached((m) => Math.max(m, 3));
+      return;
+    }
+    if (!dbProvider) {
+      setCreateError('No connection type available.');
+      return;
+    }
+
+    setIsCreating(true);
+    setCreateError(null);
+    try {
+      const dataSource = await createDataSource({ name: connectionName.trim() });
+      const connection = await createConnection({
+        data_source_id: dataSource.id,
+        connection_type_id: dbProvider.id,
+        name: connectionName.trim(),
+        // "TEST" isn't a valid value — the connections table's ck_connections_environment
+        // check constraint only allows PROD | STAGING | DEV | DR | UNKNOWN (confirmed in
+        // migration 0003; environment is plain str at the Pydantic layer, so an invalid
+        // value reaches the DB and surfaces as a raw 500, not a 422). Found via this task's
+        // live testing, fixed here rather than left in.
+        environment: 'DEV',
+        host: host.trim(),
+        port: Number(port),
+        database_name: dbName.trim(),
+        username: username.trim(),
+        credential: { username: username.trim(), password },
+      });
+      setCreatedConnectionId(connection.id);
+      setStep(3);
+      setMaxStepReached((m) => Math.max(m, 3));
+    } catch (err) {
+      setCreateError(err instanceof ApiError ? err.message : 'Failed to create data source/connection.');
+    } finally {
+      setIsCreating(false);
+    }
   };
 
-  const handleContinueFromDetails = (e: React.FormEvent) => {
-    e.preventDefault();
-    setStep(3);
-    setMaxStepReached((m) => Math.max(m, 3));
-    setTestStatus('idle');
-    setTestAttempts(0);
+  const handleTestConnection = async () => {
+    if (category !== 'database' || !createdConnectionId) return;
+    setTestStatus('testing');
+    setTestMessage(null);
+    try {
+      const result = await testConnection(createdConnectionId);
+      if (result.status === 'HEALTHY') {
+        setTestStatus('success');
+        setTestMessage(`Connection successful — last tested ${result.last_tested_at ?? 'just now'}.`);
+      } else {
+        setTestStatus('error');
+        setTestMessage(`Connection status: ${result.status}`);
+      }
+    } catch (err) {
+      setTestStatus('error');
+      setTestMessage(err instanceof ApiError ? err.message : 'Could not reach the host.');
+    }
+  };
+
+  const handleDiscover = async () => {
+    if (!createdConnectionId) return;
+    setDiscoveryStatus('running');
+    setDiscoveryError(null);
+    try {
+      const job = await discoverConnection(createdConnectionId);
+      let current = job;
+      // Discovery runs on a Celery worker — poll the generic job status until it
+      // leaves a non-terminal state, exactly as a real user watching progress would.
+      while (current.status === 'QUEUED' || current.status === 'RUNNING') {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        current = await getJob(job.id);
+      }
+      if (current.status === 'COMPLETED') {
+        setDiscoveryStatus('completed');
+      } else {
+        setDiscoveryStatus('failed');
+        setDiscoveryError(current.error_message ?? `Discovery ended with status ${current.status}`);
+      }
+    } catch (err) {
+      setDiscoveryStatus('failed');
+      setDiscoveryError(err instanceof ApiError ? err.message : 'Discovery failed.');
+    }
   };
 
   const handleFinish = () => {
+    if (category === 'database') {
+      onComplete();
+      return;
+    }
+
     const resolvedHost =
-      category === 'database'
-        ? `${host || 'localhost'}:${port}`
-        : category === 'api'
-        ? apiEndpoint || 'connected.datacraft.internal'
-        : filePath || 'connected.datacraft.internal';
+      category === 'api' ? apiEndpoint || 'connected.datacraft.internal' : filePath || 'connected.datacraft.internal';
 
     onComplete({
       name: connectionName.trim(),
       type: category,
-      typeLabel:
-        category === 'database'
-          ? dbProvider.label
-          : category === 'api'
-          ? 'REST / GraphQL API'
-          : 'S3 / File Bucket',
+      typeLabel: category === 'api' ? 'REST / GraphQL API' : 'S3 / File Bucket',
       host: resolvedHost,
     });
   };
@@ -242,22 +364,28 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                       Choose a provider
                     </label>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      {DB_PROVIDERS.map((p) => (
+                      {connectionTypes.map((p) => (
                         <button
                           key={p.id}
                           type="button"
                           onClick={() => handleSelectProvider(p)}
                           className={`flex items-center gap-2 p-3 rounded-md border text-xs font-semibold transition-all cursor-pointer ${
-                            dbProvider.id === p.id
+                            dbProvider?.id === p.id
                               ? 'bg-primary-fixed border-primary text-on-primary-fixed'
                               : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
                           }`}
                         >
-                          <span className="material-symbols-outlined text-lg">{p.icon}</span>
-                          <span>{p.label}</span>
+                          <span className="material-symbols-outlined text-lg">database</span>
+                          <span>{p.display_name}</span>
                         </button>
                       ))}
                     </div>
+                    {connectionTypes.length > 0 && dbProvider?.code !== 'POSTGRESQL' && (
+                      <p className="text-[11px] text-outline mt-2">
+                        Only PostgreSQL has a working test/discovery implementation today — the others are
+                        registered stubs and will fail with a real error if tried.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -283,34 +411,10 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
             {/* Step 2: Connection Details */}
             {step === 2 && (
               <form onSubmit={handleContinueFromDetails} className="space-y-5">
-                {testStatus !== 'idle' && (
-                  <div
-                    className={`p-3.5 rounded-md flex items-start gap-2.5 text-xs ${
-                      testStatus === 'success'
-                        ? 'bg-primary-fixed text-on-primary-fixed'
-                        : testStatus === 'error'
-                        ? 'bg-error-container text-on-error-container'
-                        : 'bg-surface-container-low text-on-surface-variant'
-                    }`}
-                  >
-                    <span
-                      className={`material-symbols-outlined text-lg mt-0.5 ${
-                        testStatus === 'testing' ? 'animate-spin' : ''
-                      }`}
-                    >
-                      {testStatus === 'testing'
-                        ? 'sync'
-                        : testStatus === 'success'
-                        ? 'check_circle'
-                        : 'error'}
-                    </span>
-                    <span className="font-medium leading-relaxed">
-                      {testStatus === 'testing' && 'Testing connection...'}
-                      {testStatus === 'success' &&
-                        `Connection successful — DataCraft was able to reach "${host || connectionName}".`}
-                      {testStatus === 'error' &&
-                        'Could not reach the host. Double-check the address, port, and credentials, then retry.'}
-                    </span>
+                {createError && (
+                  <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                    <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                    <span className="font-medium leading-relaxed">{createError}</span>
                   </div>
                 )}
 
@@ -336,10 +440,8 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                       </label>
                       <div className="w-full flex items-center justify-between bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5">
                         <span className="flex items-center gap-2 text-sm text-on-surface font-medium">
-                          <span className="material-symbols-outlined text-lg text-primary">
-                            {dbProvider.icon}
-                          </span>
-                          {dbProvider.label}
+                          <span className="material-symbols-outlined text-lg text-primary">database</span>
+                          {dbProvider?.display_name ?? '—'}
                         </span>
                         <button
                           type="button"
@@ -507,47 +609,26 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                   </div>
                 )}
 
-                <div className="pt-4 border-t border-surface-container flex items-center justify-between gap-3">
+                <div className="pt-4 border-t border-surface-container flex items-center justify-end gap-3">
                   <button
                     type="button"
-                    onClick={handleTestConnection}
-                    disabled={testStatus === 'testing' || !canContinueFromDetails}
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-md border border-outline-variant text-on-surface text-xs font-semibold hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={onBack}
+                    className="text-xs font-semibold text-on-surface-variant hover:text-on-surface cursor-pointer"
                   >
-                    <span
-                      className={`material-symbols-outlined text-base ${
-                        testStatus === 'testing' ? 'animate-spin' : ''
-                      }`}
-                    >
-                      {testStatus === 'testing' ? 'sync' : 'bolt'}
-                    </span>
-                    {testStatus === 'testing'
-                      ? 'Testing...'
-                      : testStatus === 'error'
-                      ? 'Retry Test'
-                      : 'Test Connection'}
+                    Cancel
                   </button>
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={onBack}
-                      className="text-xs font-semibold text-on-surface-variant hover:text-on-surface cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={!canContinueFromDetails}
-                      className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Continue
-                    </button>
-                  </div>
+                  <button
+                    type="submit"
+                    disabled={!canContinueFromDetails || isCreating}
+                    className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isCreating ? 'Creating…' : category === 'database' ? 'Create & Continue' : 'Continue'}
+                  </button>
                 </div>
               </form>
             )}
 
-            {/* Step 3: Test & Save */}
+            {/* Step 3: Test, Discover & Finish */}
             {step === 3 && (
               <div className="space-y-6">
                 <div
@@ -576,20 +657,55 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                     <p className="text-sm font-bold">
                       {testStatus === 'idle' && 'Ready to test your connection'}
                       {testStatus === 'testing' && 'Testing connection...'}
-                      {testStatus === 'success' && 'Connection successful'}
+                      {testStatus === 'success' && 'Connection HEALTHY'}
                       {testStatus === 'error' && 'Connection failed'}
                     </p>
                     <p className="text-xs mt-1 leading-relaxed opacity-90">
                       {testStatus === 'idle' &&
-                        `Run a quick check against "${connectionName || 'your source'}" before saving it to DataCraft.`}
-                      {testStatus === 'testing' && 'Reaching out to the endpoint and verifying credentials.'}
-                      {testStatus === 'success' &&
-                        `DataCraft was able to reach "${connectionName || 'your source'}" and authenticate successfully.`}
-                      {testStatus === 'error' &&
-                        'Could not reach the host. Double-check the address, port, and credentials, then retry.'}
+                        (category === 'database'
+                          ? `Run a real check against "${connectionName || 'your source'}" — the data source and connection have already been created.`
+                          : `Run a quick check against "${connectionName || 'your source'}" before saving it to DataCraft.`)}
+                      {testStatus === 'testing' && 'Reaching out to the host and verifying credentials.'}
+                      {testMessage}
                     </p>
                   </div>
                 </div>
+
+                {category === 'database' && discoveryStatus !== 'idle' && (
+                  <div
+                    className={`p-5 rounded-md flex items-start gap-3 ${
+                      discoveryStatus === 'completed'
+                        ? 'bg-primary-fixed text-on-primary-fixed'
+                        : discoveryStatus === 'failed'
+                        ? 'bg-error-container text-on-error-container'
+                        : 'bg-surface-container-low text-on-surface-variant'
+                    }`}
+                  >
+                    <span
+                      className={`material-symbols-outlined text-2xl mt-0.5 ${
+                        discoveryStatus === 'running' ? 'animate-spin' : ''
+                      }`}
+                    >
+                      {discoveryStatus === 'running'
+                        ? 'sync'
+                        : discoveryStatus === 'completed'
+                        ? 'check_circle'
+                        : 'error'}
+                    </span>
+                    <div>
+                      <p className="text-sm font-bold">
+                        {discoveryStatus === 'running' && 'Discovering schemas, tables & columns...'}
+                        {discoveryStatus === 'completed' && 'Discovery complete'}
+                        {discoveryStatus === 'failed' && 'Discovery failed'}
+                      </p>
+                      <p className="text-xs mt-1 leading-relaxed opacity-90">
+                        {discoveryStatus === 'completed' &&
+                          'View the discovered schema and tables in Data Explorer.'}
+                        {discoveryError}
+                      </p>
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 space-y-2 text-xs">
                   <div className="flex items-center justify-between">
@@ -609,23 +725,40 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                 </div>
 
                 <div className="pt-4 border-t border-surface-container flex items-center justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={handleTestConnection}
-                    disabled={testStatus === 'testing'}
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-md border border-outline-variant text-on-surface text-xs font-semibold hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-60"
-                  >
-                    <span className={`material-symbols-outlined text-base ${testStatus === 'testing' ? 'animate-spin' : ''}`}>
-                      {testStatus === 'testing' ? 'sync' : 'bolt'}
-                    </span>
-                    {testStatus === 'testing'
-                      ? 'Testing...'
-                      : testStatus === 'error'
-                      ? 'Retry Test'
-                      : testStatus === 'success'
-                      ? 'Test Again'
-                      : 'Test Connection'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleTestConnection}
+                      disabled={testStatus === 'testing'}
+                      className="flex items-center gap-2 px-4 py-2.5 rounded-md border border-outline-variant text-on-surface text-xs font-semibold hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-60"
+                    >
+                      <span className={`material-symbols-outlined text-base ${testStatus === 'testing' ? 'animate-spin' : ''}`}>
+                        {testStatus === 'testing' ? 'sync' : 'bolt'}
+                      </span>
+                      {testStatus === 'testing'
+                        ? 'Testing...'
+                        : testStatus === 'error'
+                        ? 'Retry Test'
+                        : testStatus === 'success'
+                        ? 'Test Again'
+                        : 'Test Connection'}
+                    </button>
+                    {category === 'database' && testStatus === 'success' && (
+                      <button
+                        type="button"
+                        onClick={handleDiscover}
+                        disabled={discoveryStatus === 'running'}
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-md border border-outline-variant text-on-surface text-xs font-semibold hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-60"
+                      >
+                        <span
+                          className={`material-symbols-outlined text-base ${discoveryStatus === 'running' ? 'animate-spin' : ''}`}
+                        >
+                          {discoveryStatus === 'running' ? 'sync' : 'travel_explore'}
+                        </span>
+                        {discoveryStatus === 'running' ? 'Discovering...' : 'Discover Schema'}
+                      </button>
+                    )}
+                  </div>
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
@@ -638,10 +771,10 @@ export const AddDataSourceView: React.FC<AddDataSourceViewProps> = ({ onBack, on
                       type="button"
                       onClick={handleFinish}
                       disabled={testStatus !== 'success'}
-                      title={testStatus !== 'success' ? 'Test the connection successfully before saving' : undefined}
+                      title={testStatus !== 'success' ? 'Test the connection successfully before finishing' : undefined}
                       className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Save Data Source
+                      {category === 'database' ? 'Done' : 'Save Data Source'}
                     </button>
                   </div>
                 </div>

@@ -7,6 +7,9 @@ interface ValidationRunDetailsViewProps {
   canCancel: boolean;
   isCancelling: boolean;
   onCancel: () => void;
+  canStartReview: boolean;
+  isStartingReview: boolean;
+  onStartReview: () => void;
   actionError: string | null;
 }
 
@@ -34,6 +37,9 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
   canCancel,
   isCancelling,
   onCancel,
+  canStartReview,
+  isStartingReview,
+  onStartReview,
   actionError,
 }) => {
   if (!run) {
@@ -94,6 +100,20 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
               {isCancelling ? 'sync' : 'cancel'}
             </span>
             {isCancelling ? 'Cancelling…' : 'Cancel Run'}
+          </button>
+        )}
+
+        {canStartReview && run.status === 'COMPLETED' && (
+          <button
+            type="button"
+            onClick={onStartReview}
+            disabled={isStartingReview}
+            className="mt-3 flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold bg-primary hover:bg-primary-container text-on-primary transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-base ${isStartingReview ? 'animate-spin' : ''}`}>
+              {isStartingReview ? 'sync' : 'fact_check'}
+            </span>
+            {isStartingReview ? 'Starting review…' : 'Start Review'}
           </button>
         )}
 
