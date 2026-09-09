@@ -49,10 +49,18 @@ export const StagingPublishView: React.FC<StagingPublishViewProps> = ({
 }) => {
   // Drift is field-level (per-record corrected-field original vs current value), not a
   // whole-row flag — surface which named fields actually drifted, not just "drift exists".
+  // BUG FIX (found via follow-up review): this compared against 'NONE', a value the
+  // backend never uses — app/modules/staging/service.py's own no-drift sentinel is
+  // 'UNCHANGED' (the ck_staging_records_source_drift_status constraint only allows
+  // UNCHANGED | VALUE_CHANGED | RECORD_NOT_FOUND). The comparison was permanently true
+  // for every real record, silently masked here only because the `&& r.source_drift_fields`
+  // null-check happened to still gate correctly for VALUE_CHANGED rows — but a
+  // RECORD_NOT_FOUND row (drifted, with no field-level diff to report) would incorrectly
+  // fall through to "No drift".
   const driftedFieldNames = Array.from(
     new Set(
       stagingRecords
-        .filter((r) => r.source_drift_status !== 'NONE' && r.source_drift_fields)
+        .filter((r) => r.source_drift_status !== 'UNCHANGED' && r.source_drift_fields)
         .flatMap((r) => (r.source_drift_fields as string[]) ?? [])
     )
   );
@@ -239,12 +247,17 @@ export const StagingPublishView: React.FC<StagingPublishViewProps> = ({
                 {stagingRecords.slice(0, 25).map((r) => (
                   <div key={r.id} className="p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="font-mono text-on-surface-variant">{r.record_ref}</span>
+                    {/* BUG FIX: this className check had no `&& r.source_drift_fields` guard
+                        (unlike the text below), so with the old 'NONE' comparison — a value
+                        the backend never emits — every record's row rendered in the red
+                        "drifted" color regardless of its real status. Not just latent: this
+                        one was visibly wrong for every staging run. */}
                     <span
                       className={
-                        r.source_drift_status !== 'NONE' ? 'text-on-error-container font-semibold' : 'text-outline'
+                        r.source_drift_status !== 'UNCHANGED' ? 'text-on-error-container font-semibold' : 'text-outline'
                       }
                     >
-                      {r.source_drift_status !== 'NONE' && r.source_drift_fields
+                      {r.source_drift_status !== 'UNCHANGED' && r.source_drift_fields
                         ? `Drifted: ${(r.source_drift_fields as string[]).join(', ')}`
                         : 'No drift'}
                     </span>
