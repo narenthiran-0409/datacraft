@@ -1,41 +1,23 @@
 import React, { useState } from 'react';
-import { NavScreen, PlatformRole, User } from '../../types';
+import { NavScreen, User } from '../../types';
+import { RoleResponse } from '../../api/client';
 
 interface UserManagementViewProps {
   onNavigate: (screen: NavScreen) => void;
   users: User[];
-  onCreateUser: (input: { name: string; email: string; company: string; platformRole: PlatformRole }) => void;
-  onEditUser: (id: string, updates: { name: string; email: string; company: string; platformRole: PlatformRole }) => void;
+  roles: RoleResponse[];
+  canManageUsers: boolean;
+  actionPendingId: string | null;
+  actionError: string | null;
+  isCreating: boolean;
+  createError: string | null;
+  createdCredential: { email: string; temporaryPassword: string } | null;
+  onDismissCredential: () => void;
+  onCreateUser: (input: { name: string; email: string; roleId: string | null }) => Promise<boolean>;
+  onEditUser: (id: string, updates: { name: string; roleId: string | null }) => Promise<boolean>;
+  onDeactivateUser: (id: string) => void;
   onResetPassword: (id: string) => void;
 }
-
-const ROLE_OPTIONS: PlatformRole[] = ['administrator', 'analyst', 'reviewer', 'approver', 'publisher'];
-
-const ROLE_LABEL: Record<PlatformRole, string> = {
-  administrator: 'Administrator',
-  analyst: 'Analyst',
-  reviewer: 'Reviewer',
-  approver: 'Approver',
-  publisher: 'Publisher',
-};
-
-const ROLE_ICON: Record<PlatformRole, string> = {
-  administrator: 'shield_person',
-  analyst: 'query_stats',
-  reviewer: 'fact_check',
-  approver: 'verified',
-  publisher: 'cloud_upload',
-};
-
-// Five genuinely distinct treatments, not a reuse of the 3-state
-// healthy/warning/critical status palette.
-const ROLE_STYLES: Record<PlatformRole, string> = {
-  administrator: 'bg-primary text-on-primary',
-  approver: 'bg-primary-fixed text-on-primary-fixed',
-  reviewer: 'bg-tertiary-fixed text-on-tertiary-fixed',
-  analyst: 'bg-secondary-fixed text-on-secondary-fixed',
-  publisher: 'bg-deep-navy text-on-deep-navy',
-};
 
 const STATUS_DOT: Record<User['accountStatus'], string> = {
   active: 'bg-primary',
@@ -52,46 +34,64 @@ const STATUS_LABEL: Record<User['accountStatus'], string> = {
 interface FormState {
   name: string;
   email: string;
-  company: string;
-  platformRole: PlatformRole;
+  roleId: string | null;
 }
 
-const EMPTY_FORM: FormState = { name: '', email: '', company: '', platformRole: 'analyst' };
+const EMPTY_FORM: FormState = { name: '', email: '', roleId: null };
 
 export const UserManagementView: React.FC<UserManagementViewProps> = ({
   users,
+  roles,
+  canManageUsers,
+  actionPendingId,
+  actionError,
+  isCreating,
+  createError,
+  createdCredential,
+  onDismissCredential,
   onCreateUser,
   onEditUser,
+  onDeactivateUser,
   onResetPassword,
 }) => {
   const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const roleById = new Map(roles.map((r) => [r.id, r]));
 
   const openCreate = () => {
     setForm(EMPTY_FORM);
     setEditingUserId(null);
+    setFormError(null);
     setModalMode('create');
   };
 
   const openEdit = (user: User) => {
-    setForm({ name: user.name, email: user.email, company: user.company, platformRole: user.platformRole });
+    // Single-select going forward, even though the backend allows a user to hold
+    // multiple roles — this UI picks (or replaces with) exactly one. If a user
+    // already has more than one, all are still shown as badges in the list below.
+    const currentRoleId = roles.find((r) => user.roleNames.includes(r.name))?.id ?? null;
+    setForm({ name: user.name, email: user.email, roleId: currentRoleId });
     setEditingUserId(user.id);
+    setFormError(null);
     setModalMode('edit');
   };
 
   const closeModal = () => setModalMode(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim() || !form.email.trim()) return;
+    setFormError(null);
+    if (!form.name.trim() || (modalMode === 'create' && !form.email.trim())) return;
 
-    if (modalMode === 'edit' && editingUserId) {
-      onEditUser(editingUserId, form);
-    } else {
-      onCreateUser(form);
-    }
-    closeModal();
+    const ok =
+      modalMode === 'edit' && editingUserId
+        ? await onEditUser(editingUserId, { name: form.name, roleId: form.roleId })
+        : await onCreateUser({ name: form.name, email: form.email, roleId: form.roleId });
+
+    if (ok) closeModal();
   };
 
   return (
@@ -99,84 +99,136 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-outline-variant pb-6">
         <div>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
-              Workspace Administration
-            </span>
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-error-container text-on-error-container">
-              <span className="material-symbols-outlined text-xs">lock</span>
-              Admin Only
-            </span>
-          </div>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-primary block mb-2">
+            Workspace Administration
+          </span>
           <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
             User &amp; Role Management
           </h1>
           <p className="text-xs text-on-surface-variant mt-1 font-sans max-w-2xl">
-            This area is intended for administrators. There's no real session or permission
-            system in place yet, so access isn't actually restricted here — this badge is a
-            placeholder for that gate.
+            Real users and roles from the backend. Creating, editing, deactivating, and
+            resetting passwords requires the users.manage permission.
           </p>
         </div>
 
-        <button
-          onClick={openCreate}
-          className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer shrink-0"
-        >
-          <span className="material-symbols-outlined text-lg">person_add</span>
-          <span>Invite User</span>
-        </button>
+        {canManageUsers && (
+          <button
+            onClick={openCreate}
+            className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer shrink-0"
+          >
+            <span className="material-symbols-outlined text-lg">person_add</span>
+            <span>Invite User</span>
+          </button>
+        )}
       </div>
+
+      {createdCredential && (
+        <div className="flex items-start gap-3 rounded-md border border-primary/30 bg-primary-fixed px-4 py-3.5 text-sm text-on-primary-fixed">
+          <span className="material-symbols-outlined text-base shrink-0 mt-0.5">key</span>
+          <div className="flex-1">
+            <p className="font-semibold">Temporary password for {createdCredential.email}</p>
+            <p className="font-mono text-xs mt-1 bg-white/40 inline-block px-2 py-1 rounded">
+              {createdCredential.temporaryPassword}
+            </p>
+            <p className="text-[11px] mt-1.5 opacity-90">
+              Copy this now — it won't be shown again. The user must reset it on first login.
+            </p>
+          </div>
+          <button
+            onClick={onDismissCredential}
+            className="p-1 text-on-primary-fixed/70 hover:text-on-primary-fixed rounded transition-colors cursor-pointer shrink-0"
+          >
+            <span className="material-symbols-outlined text-lg">close</span>
+          </button>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
+          <span className="material-symbols-outlined text-base shrink-0">error</span>
+          <span>{actionError}</span>
+        </div>
+      )}
 
       {/* User List */}
       <div className="bg-white rounded-lg border border-outline-variant shadow-ambient overflow-hidden">
         <div className="divide-y divide-surface-container">
-          {users.map((user) => (
-            <div key={user.id} className="p-5 flex flex-col sm:flex-row sm:items-center gap-4">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <img
-                  src={user.avatarUrl}
-                  alt={user.name}
-                  className="w-10 h-10 rounded-full object-cover shrink-0"
-                  referrerPolicy="no-referrer"
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-on-surface truncate">{user.name}</p>
-                  <p className="text-xs text-outline truncate">{user.email}</p>
+          {users.length === 0 && (
+            <p className="p-8 text-center text-sm text-on-surface-variant">No users found.</p>
+          )}
+          {users.map((user) => {
+            const isPending = actionPendingId === user.id;
+            return (
+              <div key={user.id} className="p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <img
+                    src={user.avatarUrl}
+                    alt={user.name}
+                    className="w-10 h-10 rounded-full object-cover shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-on-surface truncate">{user.name}</p>
+                    <p className="text-xs text-outline truncate">{user.email}</p>
+                  </div>
                 </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-fit">
+                  {user.roleNames.length === 0 ? (
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-outline italic">
+                      No role assigned
+                    </span>
+                  ) : (
+                    user.roleNames.map((name) => (
+                      <span
+                        key={name}
+                        className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-primary-fixed text-on-primary-fixed"
+                      >
+                        {name}
+                      </span>
+                    ))
+                  )}
+                </div>
+
+                <span className="flex items-center gap-1.5 text-xs font-medium text-on-surface-variant shrink-0 w-24">
+                  <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[user.accountStatus]}`} />
+                  {STATUS_LABEL[user.accountStatus]}
+                </span>
+
+                {canManageUsers && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => onResetPassword(user.id)}
+                      disabled={isPending}
+                      className="px-3 py-1.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      Reset Password
+                    </button>
+                    <button
+                      onClick={() => openEdit(user)}
+                      disabled={isPending}
+                      className="px-3 py-1.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      Edit
+                    </button>
+                    {user.accountStatus !== 'disabled' && (
+                      <button
+                        onClick={() => onDeactivateUser(user.id)}
+                        disabled={isPending}
+                        className="px-3 py-1.5 rounded-md text-xs font-semibold border border-error/30 text-error hover:bg-error/10 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isPending ? 'Working…' : 'Deactivate'}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
-
-              <span
-                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-3 py-1 rounded-full shrink-0 w-fit ${ROLE_STYLES[user.platformRole]}`}
-              >
-                <span className="material-symbols-outlined text-xs">{ROLE_ICON[user.platformRole]}</span>
-                {ROLE_LABEL[user.platformRole]}
-              </span>
-
-              <span className="flex items-center gap-1.5 text-xs font-medium text-on-surface-variant shrink-0 w-24">
-                <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[user.accountStatus]}`} />
-                {STATUS_LABEL[user.accountStatus]}
-              </span>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => onResetPassword(user.id)}
-                  className="px-3 py-1.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
-                >
-                  Reset Password
-                </button>
-                <button
-                  onClick={() => openEdit(user)}
-                  className="px-3 py-1.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface hover:bg-surface-container-low transition-colors cursor-pointer"
-                >
-                  Edit
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      {/* Create / Edit Modal — matches the Guided Rule Creator modal structure */}
+      {/* Create / Edit Modal */}
       {modalMode && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
           <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-lg w-full p-6 space-y-6 animate-in zoom-in-95 duration-200">
@@ -192,9 +244,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                     {modalMode === 'edit' ? 'Edit User' : 'Invite User'}
                   </h3>
                   <p className="text-xs text-outline">
-                    {modalMode === 'edit'
-                      ? "Update this user's profile and platform role."
-                      : 'Add a new user to this workspace.'}
+                    {modalMode === 'edit' ? "Update this user's name and role." : 'Add a new user to this workspace.'}
                   </p>
                 </div>
               </div>
@@ -207,6 +257,13 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4">
+              {(formError || createError) && (
+                <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                  <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                  <span className="font-medium leading-relaxed">{formError || createError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                   Full Name
@@ -228,46 +285,40 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 <input
                   type="email"
                   required
+                  disabled={modalMode === 'edit'}
+                  title={modalMode === 'edit' ? 'Email cannot be changed after a user is created' : undefined}
                   value={form.email}
                   onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
                   placeholder="e.g. priya.nair@company.com"
-                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
-                  Company
+                  Role
                 </label>
-                <input
-                  type="text"
-                  value={form.company}
-                  onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
-                  placeholder="e.g. DataCraft Enterprise"
-                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
-                  Platform Role
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {ROLE_OPTIONS.map((role) => (
-                    <button
-                      key={role}
-                      type="button"
-                      onClick={() => setForm((f) => ({ ...f, platformRole: role }))}
-                      className={`p-2.5 rounded-md border text-[11px] font-semibold capitalize transition-all cursor-pointer ${
-                        form.platformRole === role
-                          ? 'bg-primary text-white border-primary'
-                          : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
-                      }`}
-                    >
-                      {ROLE_LABEL[role]}
-                    </button>
-                  ))}
-                </div>
+                {roles.length === 0 ? (
+                  <p className="text-xs text-outline italic">No roles available.</p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {roles.map((role) => (
+                      <button
+                        key={role.id}
+                        type="button"
+                        onClick={() => setForm((f) => ({ ...f, roleId: role.id }))}
+                        className={`p-2.5 rounded-md border text-[11px] font-semibold capitalize transition-all cursor-pointer ${
+                          form.roleId === role.id
+                            ? 'bg-primary text-white border-primary'
+                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
+                        }`}
+                        title={role.description ?? undefined}
+                      >
+                        {role.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="pt-4 border-t border-surface-container flex items-center justify-end gap-3">
@@ -280,9 +331,10 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient"
+                  disabled={isCreating}
+                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
                 >
-                  {modalMode === 'edit' ? 'Save Changes' : 'Send Invite'}
+                  {isCreating ? 'Working…' : modalMode === 'edit' ? 'Save Changes' : 'Create User'}
                 </button>
               </div>
             </form>

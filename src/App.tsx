@@ -19,7 +19,6 @@ import {
   ReviewPerformanceSummary,
   ApprovalMetricsSummary,
   AISuggestionItem,
-  PlatformRole,
   AppSettings,
 } from './types';
 import {
@@ -51,6 +50,11 @@ import {
   listValidationRuns,
   listUsers,
   UserResponse,
+  createUser as apiCreateUser,
+  updateUser as apiUpdateUser,
+  resetUserPassword as apiResetUserPassword,
+  listRoles,
+  RoleResponse,
   // Rules
   listRules,
   createRule as apiCreateRule,
@@ -106,7 +110,7 @@ import {
   PublishRunResponse,
 } from './api/client';
 import { usePermissions } from './hooks/usePermissions';
-import { TEAM_MEMBERS, INITIAL_APP_SETTINGS, INITIAL_AI_SUGGESTIONS } from './data/mockData';
+import { INITIAL_APP_SETTINGS, INITIAL_AI_SUGGESTIONS } from './data/mockData';
 import { SideNavBar } from './components/layout/SideNavBar';
 import { TopAppBar } from './components/layout/TopAppBar';
 import { DashboardView } from './components/views/DashboardView';
@@ -263,6 +267,29 @@ function mapApprovalRequest(
   };
 }
 
+function mapUserResponseToUser(u: UserResponse, roleById: Map<string, RoleResponse>): User {
+  const roleNames = u.role_ids
+    .map((id) => roleById.get(id)?.name)
+    .filter((n): n is string => Boolean(n));
+  // The backend's status enum (ACTIVE | INACTIVE | LOCKED) has no "invited" concept —
+  // approximated here from require_password_reset (a real field: true for a newly
+  // created account that hasn't completed its first login) rather than fabricated.
+  const accountStatus: User['accountStatus'] =
+    u.status !== 'ACTIVE' ? 'disabled' : u.require_password_reset ? 'invited' : 'active';
+  const name = u.full_name || u.username || u.email;
+  return {
+    id: u.id,
+    name,
+    email: u.email,
+    avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}`,
+    roleNames,
+    accountStatus,
+    // Per-user permissions aren't exposed by GET /users — only /auth/me returns the
+    // current viewer's own permissions. Left empty rather than guessed from roleNames.
+    permissions: [],
+  };
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authStatus, setAuthStatus] = useState<'checking' | 'resolved'>('checking');
@@ -299,8 +326,23 @@ export default function App() {
 
   // App State
   const [aiSuggestions] = useState<AISuggestionItem[]>(INITIAL_AI_SUGGESTIONS);
-  const [platformUsers, setPlatformUsers] = useState<User[]>(TEAM_MEMBERS);
   const [appSettings, setAppSettings] = useState<AppSettings>(INITIAL_APP_SETTINGS);
+
+  // User & Role Management — real data (Phase 3). Shared with Settings, which needs
+  // the current user's own real role name(s), only resolvable via this same
+  // users.read-gated list (no self-service "my roles" endpoint exists).
+  const [platformUsers, setPlatformUsers] = useState<User[]>([]);
+  const [roles, setRoles] = useState<RoleResponse[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [userActionPendingId, setUserActionPendingId] = useState<string | null>(null);
+  const [userActionError, setUserActionError] = useState<string | null>(null);
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
+  // One-time real credential from resetUserPassword's generated temporary_password —
+  // shown as a persistent, explicitly-dismissed banner rather than an auto-dismissing
+  // toast, since the admin needs time to actually copy and relay it.
+  const [createdUserCredential, setCreatedUserCredential] = useState<{ email: string; temporaryPassword: string } | null>(null);
 
   // --- Real-data screens (this batch) -----------------------------------------
 
@@ -351,6 +393,22 @@ export default function App() {
   });
   const [reportsLoading, setReportsLoading] = useState(false);
   const [reportsError, setReportsError] = useState<string | null>(null);
+
+  // Dashboard — quality trend/rule-effectiveness/quality-by-dataset are shared with
+  // Reports (same reports.read-gated data, see the effect below). Pending approvals,
+  // datasets, and data sources are fetched independently per section so one failing
+  // or denied call doesn't blank the rest of the screen.
+  const [dashboardPendingApprovals, setDashboardPendingApprovals] = useState<ApprovalRequestResponse[]>([]);
+  const [dashboardApprovalsLoading, setDashboardApprovalsLoading] = useState(false);
+  const [dashboardApprovalsError, setDashboardApprovalsError] = useState<string | null>(null);
+
+  const [dashboardDatasets, setDashboardDatasets] = useState<DatasetResponse[]>([]);
+  const [dashboardDatasetsLoading, setDashboardDatasetsLoading] = useState(false);
+  const [dashboardDatasetsError, setDashboardDatasetsError] = useState<string | null>(null);
+
+  const [dashboardActiveSourceCount, setDashboardActiveSourceCount] = useState(0);
+  const [dashboardDataSourcesLoading, setDashboardDataSourcesLoading] = useState(false);
+  const [dashboardDataSourcesError, setDashboardDataSourcesError] = useState<string | null>(null);
 
   // Run History — validation-runs + profile-runs only. staging-runs, publish-runs, and
   // jobs have no list-all endpoint anywhere in this backend (only get-by-id), so they
@@ -752,8 +810,14 @@ export default function App() {
 
   // Reports: the 5 real report endpoints only. No date-range picker exists in the UI
   // yet, so a fixed trailing-90-day window is used as a reasonable default.
+  // Also powers Dashboard's quality trend/sub-metrics/"Datasets Needing Attention" —
+  // same real data, same reports.read gate, so reused rather than duplicated.
+  // BUG FIX: depends on currentUser?.id, not just currentScreen — Dashboard is also
+  // the initial screen value, so on a fresh login (currentScreen stays 'dashboard'
+  // throughout, never "changing" from anything) this would otherwise never fire at
+  // all, since currentUser/hasPermission become real only after login resolves.
   useEffect(() => {
-    if (currentScreen !== 'reports') return;
+    if (currentScreen !== 'reports' && currentScreen !== 'dashboard') return;
     if (!hasPermission('reports.read')) return;
 
     let cancelled = false;
@@ -763,6 +827,13 @@ export default function App() {
     const to = new Date();
     const from = new Date(to.getTime() - 90 * 24 * 60 * 60 * 1000);
     const range = { from: from.toISOString(), to: to.toISOString() };
+    // BUG FIX: this listUsers() call (only to resolve reviewer display names below)
+    // ran unconditionally behind just reports.read, with its own .catch swallowing
+    // the failure — harmless for the Reports screen itself, but widening this
+    // effect's trigger to also cover Dashboard (the default landing screen) meant
+    // every reports.read-but-not-users.read user now got a real 403 on every single
+    // login instead of only when they specifically visited Reports.
+    const canReadUsers = hasPermission('users.read');
 
     Promise.all([
       getQualityTrendReport(range),
@@ -770,7 +841,7 @@ export default function App() {
       getQualityByDatasetReport(),
       getReviewPerformanceReport(range),
       getApprovalMetricsReport(range),
-      listUsers().catch(() => [] as UserResponse[]),
+      canReadUsers ? listUsers().catch(() => [] as UserResponse[]) : Promise.resolve<UserResponse[]>([]),
     ])
       .then(([trend, ruleEff, byDataset, reviewPerf, approval, users]) => {
         if (cancelled) return;
@@ -780,7 +851,12 @@ export default function App() {
           trend.points.map((p) => ({
             date: formatDate(p.created_at),
             datasetName: null,
-            qualityScore: p.quality_score,
+            // BUG FIX: quality_score is a Decimal on the backend, serialized as a
+            // JSON string (e.g. "60.00") — parsed here, not just cast, since this
+            // field is now used in real arithmetic (Dashboard's health-score
+            // average), which previously produced "NaN%" from unparsed string
+            // concatenation.
+            qualityScore: Number(p.quality_score),
           }))
         );
 
@@ -792,17 +868,20 @@ export default function App() {
             // The backend has no "reviewer reject rate" for a rule — only its own
             // failure_rate (% of evaluated rows that failed it). Repurposed to show
             // that real number rather than fabricating a reject rate.
-            rejectRate: r.failure_rate ?? 0,
+            // BUG FIX: same Decimal-as-string parsing as quality_score above.
+            rejectRate: r.failure_rate !== null ? Number(r.failure_rate) : 0,
           }))
         );
 
         setQualityByDataset(
           byDataset.datasets.map((d) => ({
+            datasetId: d.dataset_id,
             datasetName: d.dataset_name,
             // quality-by-dataset has no data-source reference — left blank rather
             // than fabricated.
             dataSourceName: '',
-            latestQualityScore: d.latest_quality_score,
+            // BUG FIX: same Decimal-as-string parsing as quality_score above.
+            latestQualityScore: d.latest_quality_score !== null ? Number(d.latest_quality_score) : null,
             lastValidatedAt: d.latest_validated_at ? formatDateTime(d.latest_validated_at) : null,
           }))
         );
@@ -821,7 +900,8 @@ export default function App() {
         });
 
         setApprovalMetrics({
-          approvalRate: approval.approval_rate ?? 0,
+          // BUG FIX: same Decimal-as-string parsing as quality_score above.
+          approvalRate: approval.approval_rate !== null ? Number(approval.approval_rate) : 0,
           avgDecisionLatencyMinutes: (approval.avg_decision_latency_seconds ?? 0) / 60,
         });
       })
@@ -830,6 +910,104 @@ export default function App() {
       })
       .finally(() => {
         if (!cancelled) setReportsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentUser?.id]);
+
+  // Dashboard's remaining sections (pending approvals, records monitored, active
+  // sources) — each fetched and gated independently so one denied/failing section
+  // doesn't blank the others (matches this task's explicit resilience requirement;
+  // per-call isolation here instead of the Promise.all used elsewhere, specifically
+  // because these three calls carry three DIFFERENT permissions, unlike Reports'
+  // five calls which share one). Depends on currentUser?.id for the same reason as
+  // the Reports/Dashboard effect above — Dashboard is the initial screen value, so
+  // a fresh login never "changes" currentScreen and would otherwise never fire this.
+  useEffect(() => {
+    if (currentScreen !== 'dashboard') return;
+
+    let cancelled = false;
+    const canReadApprovals = hasPermission('approval.read');
+    const canReadDatasets = hasPermission('metadata.read');
+    const canReadDataSources = hasPermission('data_sources.read');
+
+    if (canReadApprovals) {
+      setDashboardApprovalsLoading(true);
+      setDashboardApprovalsError(null);
+      listApprovals({ status: 'PENDING' })
+        .then((items) => {
+          if (!cancelled) setDashboardPendingApprovals(items);
+        })
+        .catch((err) => {
+          if (!cancelled) setDashboardApprovalsError(extractErrorMessage(err));
+        })
+        .finally(() => {
+          if (!cancelled) setDashboardApprovalsLoading(false);
+        });
+    }
+
+    if (canReadDatasets) {
+      setDashboardDatasetsLoading(true);
+      setDashboardDatasetsError(null);
+      listDatasets({ page_size: 200 })
+        .then((resp) => {
+          if (!cancelled) setDashboardDatasets(resp.items);
+        })
+        .catch((err) => {
+          if (!cancelled) setDashboardDatasetsError(extractErrorMessage(err));
+        })
+        .finally(() => {
+          if (!cancelled) setDashboardDatasetsLoading(false);
+        });
+    }
+
+    if (canReadDataSources) {
+      setDashboardDataSourcesLoading(true);
+      setDashboardDataSourcesError(null);
+      listDataSources()
+        .then((sources) => {
+          if (!cancelled) setDashboardActiveSourceCount(sources.filter((s) => s.is_active).length);
+        })
+        .catch((err) => {
+          if (!cancelled) setDashboardDataSourcesError(extractErrorMessage(err));
+        })
+        .finally(() => {
+          if (!cancelled) setDashboardDataSourcesLoading(false);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentUser?.id]);
+
+  // User & Role Management + Settings' own role display — both need the real user
+  // list and real role names, gated on users.read (confirmed via
+  // app/api/v1/users/routes.py: GET /users and GET /roles both require it).
+  useEffect(() => {
+    if (currentScreen !== 'user-management' && currentScreen !== 'settings') return;
+    if (!hasPermission('users.read')) return;
+
+    let cancelled = false;
+    setUsersLoading(true);
+    setUsersError(null);
+
+    Promise.all([listUsers(), listRoles()])
+      .then(([users, rolesList]) => {
+        if (cancelled) return;
+        setRoles(rolesList);
+        const roleById = new Map(rolesList.map((r) => [r.id, r]));
+        setPlatformUsers(users.map((u) => mapUserResponseToUser(u, roleById)));
+      })
+      .catch((err) => {
+        if (!cancelled) setUsersError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setUsersLoading(false);
       });
 
     return () => {
@@ -1775,37 +1953,89 @@ export default function App() {
     }
   };
 
-  // User Management Actions
-  const handleCreateUser = (input: { name: string; email: string; company: string; platformRole: PlatformRole }) => {
-    const newUser: User = {
-      id: `usr-${Date.now()}`,
-      name: input.name.trim(),
-      email: input.email.trim(),
-      role: 'Team Member',
-      company: input.company.trim() || currentUser?.company || 'DataCraft',
-      avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(input.name.trim())}`,
-      platformRole: input.platformRole,
-      accountStatus: 'invited',
-      permissions: [],
-    };
-    setPlatformUsers((prev) => [...prev, newUser]);
-    triggerToast(`Invited "${newUser.name}" as ${newUser.platformRole}`);
+  // User Management Actions — real ApiError handling throughout, no optimistic
+  // updates before the real response (same discipline as Phase 2). Gated on
+  // users.manage at the render site (app/api/v1/users/routes.py: POST/PUT/reset-
+  // password all require it — confirmed by grep, not assumed to match users.read).
+  const handleCreateUser = async (input: { name: string; email: string; roleId: string | null }) => {
+    setIsCreatingUser(true);
+    setCreateUserError(null);
+    try {
+      // password is required by the schema but immediately discarded below — the
+      // real value the admin can hand to the new user comes from resetUserPassword's
+      // generated temporary_password, not from anything set here.
+      const created = await apiCreateUser({
+        email: input.email.trim(),
+        full_name: input.name.trim(),
+        password: crypto.randomUUID(),
+        role_ids: input.roleId ? [input.roleId] : [],
+      });
+      const { temporary_password } = await apiResetUserPassword(created.id, {});
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      setPlatformUsers((prev) => [...prev, mapUserResponseToUser(created, roleById)]);
+      setCreatedUserCredential({ email: created.email, temporaryPassword: temporary_password });
+      triggerToast(`User "${created.full_name || created.email}" created`);
+      return true;
+    } catch (err) {
+      setCreateUserError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setIsCreatingUser(false);
+    }
   };
 
-  const handleEditUser = (id: string, updates: { name: string; email: string; company: string; platformRole: PlatformRole }) => {
-    setPlatformUsers((prev) =>
-      prev.map((u) =>
-        u.id === id
-          ? { ...u, name: updates.name.trim(), email: updates.email.trim(), company: updates.company.trim() || u.company, platformRole: updates.platformRole }
-          : u
-      )
-    );
-    triggerToast('User updated');
+  const handleEditUser = async (id: string, updates: { name: string; roleId: string | null }) => {
+    setUserActionPendingId(id);
+    setUserActionError(null);
+    try {
+      const updated = await apiUpdateUser(id, {
+        full_name: updates.name.trim(),
+        role_ids: updates.roleId ? [updates.roleId] : [],
+      });
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      const mapped = mapUserResponseToUser(updated, roleById);
+      setPlatformUsers((prev) => prev.map((u) => (u.id === id ? mapped : u)));
+      if (currentUser?.id === id) setCurrentUser(mapped.roleNames.length ? { ...currentUser, name: mapped.name, roleNames: mapped.roleNames } : { ...currentUser, name: mapped.name });
+      triggerToast('User updated');
+      return true;
+    } catch (err) {
+      setUserActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setUserActionPendingId(null);
+    }
   };
 
-  const handleResetPassword = (id: string) => {
-    const target = platformUsers.find((u) => u.id === id);
-    triggerToast(`Password reset link sent to ${target?.email}`);
+  const handleDeactivateUser = async (id: string) => {
+    setUserActionPendingId(id);
+    setUserActionError(null);
+    try {
+      // Soft delete only — app/api/v1/users/routes.py has no DELETE endpoint at all;
+      // UsersService.update_user just flips the status string.
+      const updated = await apiUpdateUser(id, { status: 'INACTIVE' });
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      setPlatformUsers((prev) => prev.map((u) => (u.id === id ? mapUserResponseToUser(updated, roleById) : u)));
+      triggerToast('User deactivated');
+    } catch (err) {
+      setUserActionError(extractErrorMessage(err));
+    } finally {
+      setUserActionPendingId(null);
+    }
+  };
+
+  const handleResetPassword = async (id: string) => {
+    setUserActionPendingId(id);
+    setUserActionError(null);
+    try {
+      const target = platformUsers.find((u) => u.id === id);
+      const { temporary_password } = await apiResetUserPassword(id, {});
+      setCreatedUserCredential({ email: target?.email ?? id, temporaryPassword: temporary_password });
+      triggerToast(`Password reset for ${target?.email ?? 'user'}`);
+    } catch (err) {
+      setUserActionError(extractErrorMessage(err));
+    } finally {
+      setUserActionPendingId(null);
+    }
   };
 
   // Settings Actions
@@ -1814,12 +2044,26 @@ export default function App() {
     triggerToast('Settings updated');
   };
 
-  const handleUpdateProfile = (updates: { name: string; email: string }) => {
+  // Real persistence requires users.manage (PUT /users/{id} — there is no
+  // self-service profile-update endpoint), and only full_name is settable this way;
+  // UserUpdateRequest has no email field at all, so email is left read-only rather
+  // than silently accepted and dropped. Gated at the render site.
+  const handleUpdateProfile = async (updates: { name: string }) => {
     if (!currentUser) return;
-    const userId = currentUser.id;
-    setCurrentUser((prev) => (prev ? { ...prev, ...updates } : prev));
-    setPlatformUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...updates } : u)));
-    triggerToast('Profile updated');
+    setUserActionPendingId(currentUser.id);
+    setUserActionError(null);
+    try {
+      const updated = await apiUpdateUser(currentUser.id, { full_name: updates.name.trim() });
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      const mapped = mapUserResponseToUser(updated, roleById);
+      setCurrentUser({ ...currentUser, name: mapped.name, roleNames: mapped.roleNames.length ? mapped.roleNames : currentUser.roleNames });
+      setPlatformUsers((prev) => prev.map((u) => (u.id === currentUser.id ? mapped : u)));
+      triggerToast('Profile updated');
+    } catch (err) {
+      setUserActionError(extractErrorMessage(err));
+    } finally {
+      setUserActionPendingId(null);
+    }
   };
 
   if (authStatus === 'checking') {
@@ -1894,6 +2138,28 @@ export default function App() {
               currentUser={currentUser}
               onNavigate={handleNavigate}
               onOpenNewDataset={() => handleNavigate('add-data-source')}
+              onOpenDataset={(datasetId) => {
+                setSelectedDatasetId(datasetId);
+                handleNavigate('dataset-overview');
+              }}
+              canReadReports={hasPermission('reports.read')}
+              reportsLoading={reportsLoading}
+              reportsError={reportsError}
+              qualityTrend={qualityTrend}
+              ruleEffectiveness={ruleEffectiveness}
+              qualityByDataset={qualityByDataset}
+              canReadApprovals={hasPermission('approval.read')}
+              approvalsLoading={dashboardApprovalsLoading}
+              approvalsError={dashboardApprovalsError}
+              pendingApprovals={dashboardPendingApprovals}
+              canReadDatasets={hasPermission('metadata.read')}
+              datasetsLoading={dashboardDatasetsLoading}
+              datasetsError={dashboardDatasetsError}
+              datasets={dashboardDatasets}
+              canReadDataSources={hasPermission('data_sources.read')}
+              dataSourcesLoading={dashboardDataSourcesLoading}
+              dataSourcesError={dashboardDataSourcesError}
+              activeSourceCount={dashboardActiveSourceCount}
             />
           )}
 
@@ -2166,22 +2432,44 @@ export default function App() {
             <AIInsightsView onNavigate={handleNavigate} suggestions={aiSuggestions} />
           )}
 
-          {currentScreen === 'user-management' && (
-            <UserManagementView
-              onNavigate={handleNavigate}
-              users={platformUsers}
-              onCreateUser={handleCreateUser}
-              onEditUser={handleEditUser}
-              onResetPassword={handleResetPassword}
-            />
-          )}
+          {currentScreen === 'user-management' &&
+            renderGated(
+              hasPermission('users.read'),
+              'You need the users.read permission to view users.',
+              usersLoading,
+              'Loading users…',
+              usersError,
+              <UserManagementView
+                onNavigate={handleNavigate}
+                users={platformUsers}
+                roles={roles}
+                canManageUsers={hasPermission('users.manage')}
+                actionPendingId={userActionPendingId}
+                actionError={userActionError}
+                isCreating={isCreatingUser}
+                createError={createUserError}
+                createdCredential={createdUserCredential}
+                onDismissCredential={() => setCreatedUserCredential(null)}
+                onCreateUser={handleCreateUser}
+                onEditUser={handleEditUser}
+                onDeactivateUser={handleDeactivateUser}
+                onResetPassword={handleResetPassword}
+              />
+            )}
 
-          {currentScreen === 'settings' && (
+          {currentScreen === 'settings' && currentUser && (
             <SettingsView
               onNavigate={handleNavigate}
               settings={appSettings}
               onUpdateSettings={handleUpdateSettings}
               currentUser={currentUser}
+              canReadRoles={hasPermission('users.read')}
+              rolesLoading={usersLoading}
+              rolesError={usersError}
+              currentUserRoleNames={platformUsers.find((u) => u.id === currentUser.id)?.roleNames ?? []}
+              canUpdateProfile={hasPermission('users.manage')}
+              isSavingProfile={userActionPendingId === currentUser.id}
+              profileError={userActionError}
               onUpdateProfile={handleUpdateProfile}
             />
           )}

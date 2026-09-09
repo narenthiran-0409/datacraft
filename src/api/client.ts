@@ -228,13 +228,20 @@ export function mapMeResponseToUser(me: MeResponse): User {
     id: me.id,
     name,
     email: me.email,
-    role: 'Platform User',
-    company: 'DataCraft',
     avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}`,
-    // No role concept from the backend anymore — permissions below are the real source of
-    // truth. This is a display-only placeholder until W2 replaces platformRole-based UI.
-    platformRole: 'administrator',
-    accountStatus: me.status === 'ACTIVE' ? 'active' : me.status === 'DISABLED' ? 'disabled' : 'invited',
+    // BUG FIX: role/company/platformRole used to be hardcoded here ('Platform User',
+    // 'DataCraft', 'administrator') regardless of the real logged-in user — every real
+    // login displayed as Administrator. /auth/me carries no role_ids at all (only
+    // permissions, the real source of truth for access control), so real role names
+    // can't be resolved from this response alone; left empty here and resolved
+    // separately (Settings/User Management) via listRoles() + the user's own
+    // role_ids, gated on users.read, for viewers who have it.
+    roleNames: [],
+    // BUG FIX: this compared against 'DISABLED', a status value the backend never
+    // uses — ck_users_status only allows ACTIVE | INACTIVE | LOCKED (confirmed in
+    // alembic/versions/0002_create_identity_tables.py). A genuinely INACTIVE or
+    // LOCKED user fell through to 'invited', which is wrong.
+    accountStatus: me.status === 'ACTIVE' ? 'active' : me.status === 'INACTIVE' || me.status === 'LOCKED' ? 'disabled' : 'invited',
     permissions: me.permissions,
   };
 }
@@ -1088,7 +1095,13 @@ export interface QualityTrendPoint {
   validation_run_id: string;
   dataset_id: string;
   created_at: string;
-  quality_score: number;
+  // BUG FIX: this said `number`, but app/modules/reports/schemas.py declares this
+  // Decimal, which FastAPI/Pydantic serializes to JSON as a STRING (to preserve
+  // precision) — not a number. Display-only consumers (template-literal
+  // interpolation) never noticed; the first real arithmetic on this field (Dashboard
+  // averaging/summing) surfaced it as "NaN%", since `+`/`*` on a string operand
+  // does string concatenation or coerces unpredictably rather than adding.
+  quality_score: string;
 }
 
 export interface QualityTrendResponse {
@@ -1100,7 +1113,8 @@ export interface RuleEffectivenessRow {
   rule_name: string;
   rule_type: string;
   failure_count: number;
-  failure_rate: number | null;
+  // BUG FIX: same Decimal-as-string issue as quality_score above.
+  failure_rate: string | null;
   severity_breakdown: Record<string, number>;
 }
 
@@ -1111,7 +1125,8 @@ export interface RuleEffectivenessResponse {
 export interface DatasetQualityRow {
   dataset_id: string;
   dataset_name: string;
-  latest_quality_score: number | null;
+  // BUG FIX: same Decimal-as-string issue as quality_score above.
+  latest_quality_score: string | null;
   latest_validation_run_id: string | null;
   latest_validated_at: string | null;
 }
@@ -1136,7 +1151,8 @@ export interface ApprovalMetricsResponse {
   rejected_count: number;
   partially_approved_count: number;
   pending_count: number;
-  approval_rate: number | null;
+  // BUG FIX: same Decimal-as-string issue as quality_score above.
+  approval_rate: string | null;
   avg_decision_latency_seconds: number | null;
 }
 

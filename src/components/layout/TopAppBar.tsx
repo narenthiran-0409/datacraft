@@ -244,7 +244,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                   {currentUser.email}
                 </p>
                 <span className="inline-block mt-1 text-[10px] font-medium bg-surface-container-low text-primary px-2 py-0.5 rounded-md border border-outline-variant">
-                  {currentUser.role}
+                  {currentUser.roleNames.length > 0 ? currentUser.roleNames.join(', ') : 'No role assigned'}
                 </span>
               </div>
 
@@ -273,7 +273,9 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                     />
                     <div className="flex-1 truncate">
                       <div>{member.name}</div>
-                      <div className="text-[10px] text-outline">{member.role}</div>
+                      <div className="text-[10px] text-outline">
+                        {member.roleNames.length > 0 ? member.roleNames.join(', ') : 'No role assigned'}
+                      </div>
                     </div>
                   </button>
                 ))}

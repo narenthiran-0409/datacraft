@@ -20,21 +20,33 @@ export type NavScreen =
   | 'settings'
   | 'login';
 
+// RESOLVED (Phase 3): the backend has no free-text `role` and no single
+// `platform_role` column at all — role is many-to-many via `user_roles`
+// (a user can have 0, 1, or many roles), and role NAMES come from the real
+// `roles` table. Its 5 seeded names (alembic/versions/0006_seed_roles_and_
+// permissions.py: ROLE_NAMES) happen to match this app's previous 5-value
+// PlatformRole enum exactly, but the cardinality doesn't — a user is not
+// guaranteed to have exactly one. `role` (free text) and `platformRole`
+// (fabricated single-enum, hardcoded to 'administrator' for every real
+// login) are both removed in favor of `roleNames: string[]`, populated from
+// real role_ids resolved against a real GET /roles call.
 export type PlatformRole = 'administrator' | 'analyst' | 'reviewer' | 'approver' | 'publisher';
 
 export interface User {
   id: string;
   name: string;
   email: string;
-  role: string;
-  company: string;
   avatarUrl: string;
-  platformRole: PlatformRole;
+  // Real role name(s) from the backend's roles table, resolved via the
+  // user's role_ids — empty if the user has no role assigned, or if the
+  // viewer lacks users.read (in which case this is left empty and callers
+  // must check a separate canReadRoles flag before treating [] as "no
+  // roles" rather than "not visible to you").
+  roleNames: string[];
   // Additive: required to render account status in User Management.
   accountStatus: 'active' | 'invited' | 'disabled';
   // Source of truth for what the user can do, from the backend's /auth/me
-  // response. platformRole above is now display-only until permission-gated
-  // UI (W2) replaces it.
+  // response.
   permissions: string[];
 }
 
@@ -273,6 +285,10 @@ export interface RuleEffectivenessRow {
 }
 
 export interface QualityByDatasetRow {
+  // Additive: the raw report response has dataset_id, but it was previously
+  // discarded in the mapping — needed so Dashboard's "Datasets Needing
+  // Attention" cards can navigate to the specific dataset, not just display it.
+  datasetId: string;
   datasetName: string;
   dataSourceName: string;
   latestQualityScore: number | null;
