@@ -4,8 +4,12 @@ import { ApprovalRequestItem, NavScreen } from '../../types';
 interface ApprovalCenterViewProps {
   onNavigate: (screen: NavScreen) => void;
   approvalQueue: ApprovalRequestItem[];
+  canDecide: boolean;
+  pendingId: string | null;
+  actionError: string | null;
   onApprove: (id: string, comment: string) => void;
   onReject: (id: string, comment: string) => void;
+  onSelect: (id: string) => void;
 }
 
 const STATUS_STYLES: Record<ApprovalRequestItem['status'], string> = {
@@ -25,8 +29,12 @@ const STATUS_LABEL: Record<ApprovalRequestItem['status'], string> = {
 export const ApprovalCenterView: React.FC<ApprovalCenterViewProps> = ({
   onNavigate,
   approvalQueue,
+  canDecide,
+  pendingId,
+  actionError,
   onApprove,
   onReject,
+  onSelect,
 }) => {
   const [selectedId, setSelectedId] = useState<string | null>(
     approvalQueue.find((r) => r.status === 'PENDING' || r.status === 'PARTIALLY_APPROVED')?.id ??
@@ -36,10 +44,12 @@ export const ApprovalCenterView: React.FC<ApprovalCenterViewProps> = ({
   const [comment, setComment] = useState('');
 
   const selected = approvalQueue.find((r) => r.id === selectedId) ?? null;
-  const isDecidable = selected?.status === 'PENDING' || selected?.status === 'PARTIALLY_APPROVED';
+  const isDecidable = canDecide && (selected?.status === 'PENDING' || selected?.status === 'PARTIALLY_APPROVED');
+  const isPending = !!selected && pendingId === selected.id;
 
   const handleSelect = (id: string) => {
     setSelectedId(id);
+    onSelect(id);
     setComment('');
   };
 
@@ -172,6 +182,13 @@ export const ApprovalCenterView: React.FC<ApprovalCenterViewProps> = ({
                 </div>
               </div>
 
+              {actionError && (
+                <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3.5 py-2.5 text-xs text-error">
+                  <span className="material-symbols-outlined text-base shrink-0">error</span>
+                  <span>{actionError}</span>
+                </div>
+              )}
+
               {isDecidable ? (
                 <div className="space-y-3">
                   <label className="block text-xs font-semibold text-on-surface uppercase tracking-wider">
@@ -188,18 +205,28 @@ export const ApprovalCenterView: React.FC<ApprovalCenterViewProps> = ({
                     <button
                       type="button"
                       onClick={handleReject}
-                      className="flex-1 px-4 py-2.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+                      disabled={isPending}
+                      className="flex-1 px-4 py-2.5 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
                       onClick={handleApprove}
-                      className="flex-1 px-4 py-2.5 rounded-md text-xs font-semibold bg-primary hover:bg-primary-container text-on-primary transition-colors cursor-pointer shadow-ambient"
+                      disabled={isPending}
+                      className="flex-1 px-4 py-2.5 rounded-md text-xs font-semibold bg-primary hover:bg-primary-container text-on-primary transition-colors cursor-pointer shadow-ambient disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Approve
+                      {isPending ? 'Submitting…' : 'Approve'}
                     </button>
                   </div>
+                </div>
+              ) : selected.status === 'PENDING' || selected.status === 'PARTIALLY_APPROVED' ? (
+                <div className="p-3 rounded-md text-xs flex items-start gap-2 bg-surface-container-low text-on-surface-variant">
+                  <span className="material-symbols-outlined text-base mt-0.5 text-outline">lock</span>
+                  <span>
+                    You have read-only access here — approving or rejecting requires the
+                    approval.decide permission. Having review.edit does not grant this.
+                  </span>
                 </div>
               ) : (
                 <div

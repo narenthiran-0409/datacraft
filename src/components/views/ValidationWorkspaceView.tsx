@@ -3,12 +3,14 @@ import { NavScreen, ValidationRun } from '../../types';
 
 interface ValidationWorkspaceViewProps {
   onNavigate: (screen: NavScreen) => void;
+  datasetName: string;
   validationRuns: ValidationRun[];
-  onRunValidation: (datasetName: string) => void;
+  onRunValidation: () => void;
   onSelectRun: (runId: string) => void;
+  canTriggerValidation: boolean;
+  isTriggering: boolean;
+  actionError: string | null;
 }
-
-const DATASET_NAME = 'Customer Data';
 
 const STATUS_STYLES: Record<ValidationRun['status'], string> = {
   CREATED: 'bg-surface-container text-on-surface-variant',
@@ -30,13 +32,15 @@ const STATUS_ICON: Record<ValidationRun['status'], string> = {
 
 export const ValidationWorkspaceView: React.FC<ValidationWorkspaceViewProps> = ({
   onNavigate,
+  datasetName,
   validationRuns,
   onRunValidation,
   onSelectRun,
+  canTriggerValidation,
+  isTriggering,
+  actionError,
 }) => {
-  const datasetRuns = validationRuns
-    .filter((r) => r.datasetName === DATASET_NAME)
-    .sort((a, b) => (a.id < b.id ? 1 : -1));
+  const datasetRuns = [...validationRuns].sort((a, b) => (a.id < b.id ? 1 : -1));
 
   const hasActiveRun = datasetRuns.some((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
 
@@ -50,7 +54,7 @@ export const ValidationWorkspaceView: React.FC<ValidationWorkspaceViewProps> = (
               onClick={() => onNavigate('dataset-overview')}
               className="hover:text-primary transition-colors cursor-pointer"
             >
-              {DATASET_NAME}
+              {datasetName}
             </button>
             <span>/</span>
             <span className="text-on-surface font-bold">Validation Workspace</span>
@@ -63,22 +67,33 @@ export const ValidationWorkspaceView: React.FC<ValidationWorkspaceViewProps> = (
           </p>
         </div>
 
-        <button
-          onClick={() => onRunValidation(DATASET_NAME)}
-          disabled={hasActiveRun}
-          title={hasActiveRun ? 'A run is already queued or in progress for this dataset' : undefined}
-          className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-        >
-          <span className="material-symbols-outlined text-lg">play_circle</span>
-          <span>Run Validation</span>
-        </button>
+        {canTriggerValidation && (
+          <button
+            onClick={onRunValidation}
+            disabled={hasActiveRun || isTriggering}
+            title={hasActiveRun ? 'A run is already queued or in progress for this dataset' : undefined}
+            className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+          >
+            <span className={`material-symbols-outlined text-lg ${isTriggering ? 'animate-spin' : ''}`}>
+              {isTriggering ? 'sync' : 'play_circle'}
+            </span>
+            <span>{isTriggering ? 'Starting…' : 'Run Validation'}</span>
+          </button>
+        )}
       </div>
+
+      {actionError && (
+        <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
+          <span className="material-symbols-outlined text-base shrink-0">error</span>
+          <span>{actionError}</span>
+        </div>
+      )}
 
       {/* Run History */}
       <div className="space-y-4">
         {datasetRuns.length === 0 ? (
           <div className="bg-white rounded-lg border border-outline-variant p-8 text-center text-sm text-on-surface-variant">
-            No validation runs yet for {DATASET_NAME}.
+            No validation runs yet for {datasetName}.
           </div>
         ) : (
           datasetRuns.map((run) => {

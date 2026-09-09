@@ -4,7 +4,14 @@ import { Issue, NavScreen, ReviewRun } from '../../types';
 interface ReviewCorrectionsViewProps {
   onNavigate: (screen: NavScreen) => void;
   reviewRuns: ReviewRun[];
+  selectedReviewId: string | null;
+  onSelectReview: (reviewId: string) => void;
   issues: Issue[];
+  canEdit: boolean;
+  actionError: string | null;
+  pendingIssueIds: string[];
+  onGenerateSuggestions: (reviewRunId: string) => void;
+  isGeneratingSuggestions: boolean;
   onAcceptIssue: (issueId: string) => void;
   onEditIssue: (issueId: string, finalValue: string) => void;
   onRejectIssue: (issueId: string) => void;
@@ -38,7 +45,14 @@ const STATUS_STYLES: Record<ReviewRun['status'], string> = {
 export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
   onNavigate,
   reviewRuns,
+  selectedReviewId,
+  onSelectReview,
   issues,
+  canEdit,
+  actionError,
+  pendingIssueIds,
+  onGenerateSuggestions,
+  isGeneratingSuggestions,
   onAcceptIssue,
   onEditIssue,
   onRejectIssue,
@@ -47,16 +61,17 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
   onBulkReject,
   onSubmitForApproval,
 }) => {
-  const [selectedRunId, setSelectedRunId] = useState<string>(reviewRuns[0]?.id ?? '');
   const [selectedIssueIds, setSelectedIssueIds] = useState<string[]>([]);
   const [editingIssueId, setEditingIssueId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
 
-  const selectedRun = reviewRuns.find((r) => r.id === selectedRunId) ?? reviewRuns[0];
+  const selectedRun = reviewRuns.find((r) => r.id === selectedReviewId) ?? reviewRuns[0];
   const runIssues = issues.filter((i) => i.reviewRunId === selectedRun?.id);
   const pendingIssues = runIssues.filter((i) => i.status === 'PENDING');
-  const isEditableRun = selectedRun?.status === 'IN_REVIEW' || selectedRun?.status === 'DRAFT';
+  const isEditableRun =
+    canEdit && (selectedRun?.status === 'IN_REVIEW' || selectedRun?.status === 'DRAFT');
   const canSubmit = isEditableRun && runIssues.length > 0 && pendingIssues.length === 0;
+  const isIssuePending = (issueId: string) => pendingIssueIds.includes(issueId);
 
   const toggleSelected = (issueId: string) => {
     setSelectedIssueIds((prev) =>
@@ -125,6 +140,20 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
         </div>
       </div>
 
+      {!canEdit && (
+        <div className="bg-surface-container-low rounded-md border border-outline-variant p-3.5 flex items-center gap-2 text-xs text-on-surface-variant">
+          <span className="material-symbols-outlined text-base text-outline">lock</span>
+          You have read-only access to reviews — deciding issues requires the review.edit permission.
+        </div>
+      )}
+
+      {actionError && (
+        <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-4 py-3 text-sm text-error">
+          <span className="material-symbols-outlined text-base shrink-0">error</span>
+          <span>{actionError}</span>
+        </div>
+      )}
+
       {/* Review Run Selector */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {reviewRuns.map((run) => {
@@ -135,7 +164,7 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
             <button
               key={run.id}
               onClick={() => {
-                setSelectedRunId(run.id);
+                onSelectReview(run.id);
                 setSelectedIssueIds([]);
                 setEditingIssueId(null);
               }}
@@ -199,6 +228,20 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
 
       {isEditableRun ? (
         <>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => onGenerateSuggestions(selectedRun.id)}
+              disabled={isGeneratingSuggestions}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-md text-xs font-semibold border border-outline-variant text-primary hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <span className={`material-symbols-outlined text-base ${isGeneratingSuggestions ? 'animate-spin' : ''}`}>
+                {isGeneratingSuggestions ? 'sync' : 'auto_awesome'}
+              </span>
+              {isGeneratingSuggestions ? 'Generating…' : 'Generate Suggestions'}
+            </button>
+          </div>
+
           {/* Bulk Action Toolbar */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-container-low rounded-md border border-outline-variant p-4">
             <label className="flex items-center gap-2 text-xs font-semibold text-on-surface cursor-pointer">
@@ -217,7 +260,7 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
               <button
                 type="button"
                 onClick={handleBulkReject}
-                disabled={selectedIssueIds.length === 0}
+                disabled={selectedIssueIds.length === 0 || selectedIssueIds.some(isIssuePending)}
                 className="px-3.5 py-2 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Bulk Reject
@@ -225,7 +268,7 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
               <button
                 type="button"
                 onClick={handleBulkAccept}
-                disabled={selectedIssueIds.length === 0}
+                disabled={selectedIssueIds.length === 0 || selectedIssueIds.some(isIssuePending)}
                 className="px-4 py-2 rounded-md text-xs font-semibold bg-primary hover:bg-primary-container text-on-primary transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Bulk Accept
@@ -351,25 +394,29 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
                       <>
                         <button
                           onClick={() => onSkipIssue(issue.id)}
-                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer"
+                          disabled={isIssuePending(issue.id)}
+                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Skip
                         </button>
                         <button
                           onClick={() => onRejectIssue(issue.id)}
-                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer"
+                          disabled={isIssuePending(issue.id) || (!issue.suggestionId && !issue.suggestedValue)}
+                          title={!issue.suggestionId && !issue.suggestedValue ? 'No suggestion to reject for this issue' : undefined}
+                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Reject
                         </button>
                         <button
                           onClick={() => handleStartEdit(issue)}
-                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer"
+                          disabled={isIssuePending(issue.id)}
+                          className="px-3 py-2 rounded-md text-xs font-semibold border border-outline-variant hover:bg-surface-container-low text-on-surface-variant transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Edit
                         </button>
                         <button
                           onClick={() => onAcceptIssue(issue.id)}
-                          disabled={!issue.suggestedValue}
+                          disabled={!issue.suggestedValue || isIssuePending(issue.id)}
                           className="px-4 py-2 rounded-md text-xs font-semibold bg-primary hover:bg-primary-container text-on-primary transition-colors cursor-pointer shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Accept

@@ -4,6 +4,10 @@ import { NavScreen, ValidationRun } from '../../types';
 interface ValidationRunDetailsViewProps {
   onNavigate: (screen: NavScreen) => void;
   run: ValidationRun | undefined;
+  canCancel: boolean;
+  isCancelling: boolean;
+  onCancel: () => void;
+  actionError: string | null;
 }
 
 const STATUS_STYLES: Record<ValidationRun['status'], string> = {
@@ -27,6 +31,10 @@ const formatDuration = (ms: number | null) => {
 export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> = ({
   onNavigate,
   run,
+  canCancel,
+  isCancelling,
+  onCancel,
+  actionError,
 }) => {
   if (!run) {
     return (
@@ -74,6 +82,27 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
           </span>
         </div>
         <p className="text-xs text-on-surface-variant mt-1 font-sans">{run.datasetName}</p>
+
+        {canCancel && run.jobId && (run.status === 'QUEUED' || run.status === 'RUNNING') && (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={isCancelling}
+            className="mt-3 flex items-center gap-1.5 px-4 py-2 rounded-md text-xs font-semibold border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <span className={`material-symbols-outlined text-base ${isCancelling ? 'animate-spin' : ''}`}>
+              {isCancelling ? 'sync' : 'cancel'}
+            </span>
+            {isCancelling ? 'Cancelling…' : 'Cancel Run'}
+          </button>
+        )}
+
+        {actionError && (
+          <div className="mt-3 flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3.5 py-2.5 text-xs text-error max-w-lg">
+            <span className="material-symbols-outlined text-base shrink-0">error</span>
+            <span>{actionError}</span>
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}

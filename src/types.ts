@@ -130,6 +130,10 @@ export interface Issue {
   status: 'PENDING' | 'RESOLVED' | 'SKIPPED';
   finalValue: string | null;
   ruleTriggered: string;
+  // Additive (optional so existing mock data stays valid): the backend's accept/edit/
+  // reject actions operate on a suggestion id, not the issue id — null/undefined when
+  // no suggestion exists yet for this issue.
+  suggestionId?: string | null;
 }
 
 export interface ApprovalRequestItem {
@@ -139,6 +143,9 @@ export interface ApprovalRequestItem {
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'PARTIALLY_APPROVED';
   affectedIssueCount: number;
   affectedRecordCount: number;
+  // Additive (optional so existing mock data stays valid): needed to fetch this
+  // approval's issue set fresh when approving/rejecting.
+  reviewRunId?: string;
   requestedBy: string;
   requestedAt: string;
   decidedCount: number;
@@ -200,6 +207,9 @@ export interface ValidationRun {
   startedAt: string;
   completedAt: string;
   durationMs: number | null;
+  // Additive (optional so existing mock data stays valid): needed to wire the real
+  // generic job-cancel endpoint.
+  jobId?: string | null;
 }
 
 export interface StagingRun {

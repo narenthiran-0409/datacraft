@@ -3,7 +3,6 @@ import {
   NavScreen,
   User,
   DataSource,
-  QualityRule,
   ReviewRun,
   Issue,
   ApprovalRequestItem,
@@ -11,8 +10,6 @@ import {
   ExplorerDataset,
   ExplorerColumn,
   ValidationRun,
-  StagingRun,
-  PublishRun,
   LineageNode,
   LineageEdge,
   RunHistoryItem,
@@ -54,23 +51,61 @@ import {
   listValidationRuns,
   listUsers,
   UserResponse,
+  // Rules
+  listRules,
+  createRule as apiCreateRule,
+  updateRule as apiUpdateRule,
+  listRuleVersions,
+  createRuleVersion as apiCreateRuleVersion,
+  listRuleAssignments,
+  createRuleAssignment as apiCreateRuleAssignment,
+  deleteRuleAssignment as apiDeleteRuleAssignment,
+  RuleResponse,
+  RuleVersionResponse,
+  RuleAssignmentResponse,
+  RuleCreateRequest,
+  RuleAssignmentCreateRequest,
+  RuleType,
+  RuleAssignmentScope,
+  // Validation
+  createValidationRun,
+  getValidationRun,
+  ValidationRunResponse,
+  // Jobs
+  cancelJob as apiCancelJob,
+  // Review
+  listReviews,
+  getReview,
+  listReviewIssues,
+  listReviewSuggestions,
+  generateReviewSuggestions as apiGenerateReviewSuggestions,
+  bulkReviewAction as apiBulkReviewAction,
+  acceptSuggestion as apiAcceptSuggestion,
+  editSuggestion as apiEditSuggestion,
+  rejectSuggestion as apiRejectSuggestion,
+  correctIssue as apiCorrectIssue,
+  ReviewRunResponse,
+  IssueResponse,
+  CorrectionSuggestionResponse,
+  // Approval
+  listApprovals,
+  submitApproval as apiSubmitApproval,
+  approveApproval as apiApproveApproval,
+  rejectApproval as apiRejectApproval,
+  ApprovalRequestResponse,
+  // Staging
+  createStagingRun as apiCreateStagingRun,
+  listStagingRecords,
+  StagingRunResponse,
+  StagingRecordResponse,
+  // Publishing
+  triggerPublish as apiTriggerPublish,
+  acknowledgeDrift as apiAcknowledgeDrift,
+  getPublishRun,
+  PublishRunResponse,
 } from './api/client';
 import { usePermissions } from './hooks/usePermissions';
-import {
-  TEAM_MEMBERS,
-  INITIAL_APP_SETTINGS,
-  INITIAL_QUALITY_RULES,
-  INITIAL_REVIEW_RUNS,
-  INITIAL_ISSUES,
-  INITIAL_APPROVAL_QUEUE,
-  INITIAL_SCHEMAS,
-  INITIAL_EXPLORER_DATASETS,
-  INITIAL_EXPLORER_COLUMNS,
-  INITIAL_VALIDATION_RUNS,
-  INITIAL_STAGING_RUNS,
-  INITIAL_PUBLISH_RUNS,
-  INITIAL_AI_SUGGESTIONS,
-} from './data/mockData';
+import { TEAM_MEMBERS, INITIAL_APP_SETTINGS, INITIAL_AI_SUGGESTIONS } from './data/mockData';
 import { SideNavBar } from './components/layout/SideNavBar';
 import { TopAppBar } from './components/layout/TopAppBar';
 import { DashboardView } from './components/views/DashboardView';
@@ -157,6 +192,66 @@ function formatDate(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 }
 
+function mapValidationRun(vr: ValidationRunResponse, datasetName: string): ValidationRun {
+  return {
+    id: vr.id,
+    datasetName,
+    status: (vr.status as ValidationRun['status']) || 'CREATED',
+    totalRows: vr.total_rows,
+    passedRows: vr.passed_rows,
+    warningRows: vr.warning_rows,
+    failedRows: vr.failed_rows,
+    qualityScore: vr.quality_score,
+    startedAt: formatDateTime(vr.started_at),
+    completedAt: vr.completed_at ? formatDateTime(vr.completed_at) : 'Not completed',
+    durationMs: vr.duration_ms,
+    jobId: vr.job_id,
+  };
+}
+
+function mapReviewRun(
+  rr: ReviewRunResponse,
+  datasetName: string,
+  totalIssues: number,
+  resolvedIssues: number
+): ReviewRun {
+  return {
+    id: rr.id,
+    name: rr.name || `Review ${rr.id.slice(0, 8)}`,
+    status: (rr.status as ReviewRun['status']) || 'DRAFT',
+    datasetName,
+    validationRunLabel: rr.validation_run_id.slice(0, 8),
+    totalIssues,
+    resolvedIssues,
+    createdAt: formatDateTime(rr.created_at),
+  };
+}
+
+function mapApprovalRequest(
+  ar: ApprovalRequestResponse,
+  reviewRunName: string,
+  datasetName: string,
+  requestedByName: string
+): ApprovalRequestItem {
+  // The list endpoint has no decided/remaining split — only the detail endpoint
+  // (ApprovalRequestDetailResponse) does. Approximate from status here; overlaid with
+  // the precise decided_count/remaining_count once a specific request's detail loads.
+  const isTerminal = ar.status === 'APPROVED' || ar.status === 'REJECTED';
+  return {
+    id: ar.id,
+    reviewRunName,
+    datasetName,
+    status: (ar.status as ApprovalRequestItem['status']) || 'PENDING',
+    affectedIssueCount: ar.affected_issue_count,
+    affectedRecordCount: ar.affected_record_count,
+    requestedBy: requestedByName,
+    requestedAt: formatDateTime(ar.requested_at),
+    decidedCount: isTerminal ? ar.affected_issue_count : 0,
+    remainingCount: isTerminal ? 0 : ar.affected_issue_count,
+    reviewRunId: ar.review_run_id,
+  };
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authStatus, setAuthStatus] = useState<'checking' | 'resolved'>('checking');
@@ -192,19 +287,6 @@ export default function App() {
   const { hasPermission } = usePermissions(currentUser);
 
   // App State
-  const [qualityRules, setQualityRules] = useState<QualityRule[]>(INITIAL_QUALITY_RULES);
-  const [reviewRuns, setReviewRuns] = useState<ReviewRun[]>(INITIAL_REVIEW_RUNS);
-  const [issues, setIssues] = useState<Issue[]>(INITIAL_ISSUES);
-  const [approvalQueue, setApprovalQueue] = useState<ApprovalRequestItem[]>(INITIAL_APPROVAL_QUEUE);
-  // schemas/explorerDatasets/explorerColumns stay mock-backed: handleRunValidation
-  // (Validation Workspace, out of scope for this task) still reads explorerDatasets.
-  const [schemas] = useState<SchemaNode[]>(INITIAL_SCHEMAS);
-  const [explorerDatasets] = useState<ExplorerDataset[]>(INITIAL_EXPLORER_DATASETS);
-  const [explorerColumns] = useState<ExplorerColumn[]>(INITIAL_EXPLORER_COLUMNS);
-  const [validationRuns, setValidationRuns] = useState<ValidationRun[]>(INITIAL_VALIDATION_RUNS);
-  const [selectedValidationRunId, setSelectedValidationRunId] = useState<string | null>(null);
-  const [stagingRuns] = useState<StagingRun[]>(INITIAL_STAGING_RUNS);
-  const [publishRuns, setPublishRuns] = useState<PublishRun[]>(INITIAL_PUBLISH_RUNS);
   const [aiSuggestions] = useState<AISuggestionItem[]>(INITIAL_AI_SUGGESTIONS);
   const [platformUsers, setPlatformUsers] = useState<User[]>(TEAM_MEMBERS);
   const [appSettings, setAppSettings] = useState<AppSettings>(INITIAL_APP_SETTINGS);
@@ -266,6 +348,60 @@ export default function App() {
   const [runHistoryLoading, setRunHistoryLoading] = useState(false);
   const [runHistoryError, setRunHistoryError] = useState<string | null>(null);
 
+  // --- Core decision workflow (this batch: real reads AND real mutations) ----------
+
+  // Data Quality Rules
+  const [rules, setRules] = useState<RuleResponse[]>([]);
+  const [ruleAssignments, setRuleAssignments] = useState<RuleAssignmentResponse[]>([]);
+  const [ruleVersionsByRuleId, setRuleVersionsByRuleId] = useState<Record<string, RuleVersionResponse[]>>({});
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [rulesActionError, setRulesActionError] = useState<string | null>(null);
+  const [isSavingRule, setIsSavingRule] = useState(false);
+  const [isSavingAssignment, setIsSavingAssignment] = useState(false);
+
+  // Validation Workspace — uses selectedDatasetId (shared with Data Explorer/Lineage).
+  const [validationRuns, setValidationRuns] = useState<ValidationRun[]>([]);
+  const [validationLoading, setValidationLoading] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [validationActionError, setValidationActionError] = useState<string | null>(null);
+  const [isTriggeringValidation, setIsTriggeringValidation] = useState(false);
+
+  // Validation Run Details
+  const [selectedValidationRunId, setSelectedValidationRunId] = useState<string | null>(null);
+  const [selectedValidationRun, setSelectedValidationRun] = useState<ValidationRun | null>(null);
+  const [validationDetailLoading, setValidationDetailLoading] = useState(false);
+  const [validationDetailError, setValidationDetailError] = useState<string | null>(null);
+  const [validationDetailActionError, setValidationDetailActionError] = useState<string | null>(null);
+  const [isCancellingValidationJob, setIsCancellingValidationJob] = useState(false);
+
+  // Review & Corrections
+  const [reviewRuns, setReviewRuns] = useState<ReviewRun[]>([]);
+  const [reviewRunsLoading, setReviewRunsLoading] = useState(false);
+  const [reviewRunsError, setReviewRunsError] = useState<string | null>(null);
+  const [selectedReviewId, setSelectedReviewId] = useState<string | null>(null);
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [reviewActionError, setReviewActionError] = useState<string | null>(null);
+  const [reviewActionPendingIds, setReviewActionPendingIds] = useState<string[]>([]);
+
+  // Approval Center
+  const [approvalQueue, setApprovalQueue] = useState<ApprovalRequestItem[]>([]);
+  const [approvalsLoading, setApprovalsLoading] = useState(false);
+  const [approvalsError, setApprovalsError] = useState<string | null>(null);
+  const [approvalActionError, setApprovalActionError] = useState<string | null>(null);
+  const [approvalActionPendingId, setApprovalActionPendingId] = useState<string | null>(null);
+
+  // Staging & Publish — keyed off selectedReviewId (set from Review & Corrections or
+  // Approval Center).
+  const [currentStagingRun, setCurrentStagingRun] = useState<StagingRunResponse | null>(null);
+  const [stagingRecords, setStagingRecords] = useState<StagingRecordResponse[]>([]);
+  const [driftOnlyFilter, setDriftOnlyFilter] = useState(false);
+  const [currentPublishRun, setCurrentPublishRun] = useState<PublishRunResponse | null>(null);
+  const [stagingLoading, setStagingLoading] = useState(false);
+  const [stagingError, setStagingError] = useState<string | null>(null);
+  const [stagingActionError, setStagingActionError] = useState<string | null>(null);
+  const [isStagingActionPending, setIsStagingActionPending] = useState(false);
+
   // Modals & Drawers
   const [showRuleCreatorModal, setShowRuleCreatorModal] = useState<boolean>(false);
   const [showAICopilot, setShowAICopilot] = useState<boolean>(false);
@@ -284,11 +420,37 @@ export default function App() {
     },
   ]);
 
-  // Add Rule Form
+  // Create Rule Form — fields match RuleCreateRequest exactly (rules.manage-gated).
   const [newRuleName, setNewRuleName] = useState('');
-  const [newRuleCategory, setNewRuleCategory] = useState<'formatting' | 'uniqueness' | 'completeness' | 'consistency'>('formatting');
-  const [newRulePrompt, setNewRulePrompt] = useState('');
-  const [generatedSQL, setGeneratedSQL] = useState('');
+  const [newRuleDescription, setNewRuleDescription] = useState('');
+  const [newRuleCategory, setNewRuleCategory] = useState('');
+  const [newRuleType, setNewRuleType] = useState<RuleType>('COMPLETENESS');
+  // Severity has no enum in the backend schema (plain str) — LOW/MEDIUM/HIGH/CRITICAL
+  // is an assumption based on convention elsewhere in this app, not a confirmed set.
+  const [newRuleSeverity, setNewRuleSeverity] = useState('MEDIUM');
+  const [newRuleDefinitionText, setNewRuleDefinitionText] = useState('{}');
+  const [newRuleErrorMessage, setNewRuleErrorMessage] = useState('');
+  const [newRuleFormError, setNewRuleFormError] = useState<string | null>(null);
+
+  // Create Rule Assignment Form (rule_assignments.manage-gated).
+  const [showAssignmentForm, setShowAssignmentForm] = useState(false);
+  const [assignmentRuleId, setAssignmentRuleId] = useState('');
+  const [assignmentDatasetId, setAssignmentDatasetId] = useState('');
+  const [assignmentScope, setAssignmentScope] = useState<RuleAssignmentScope>('DATASET_LEVEL');
+  const [assignmentColumnId, setAssignmentColumnId] = useState('');
+  const [assignmentColumnIds, setAssignmentColumnIds] = useState<string[]>([]);
+  const [assignmentDatasetColumns, setAssignmentDatasetColumns] = useState<ColumnResponse[]>([]);
+  const [assignmentDatasetOptions, setAssignmentDatasetOptions] = useState<DatasetResponse[]>([]);
+  const [assignmentFormError, setAssignmentFormError] = useState<string | null>(null);
+
+  // New Rule Version Form (rules.manage-gated).
+  const [showVersionForm, setShowVersionForm] = useState(false);
+  const [versionRuleId, setVersionRuleId] = useState('');
+  const [versionDefinitionText, setVersionDefinitionText] = useState('{}');
+  const [versionSeverity, setVersionSeverity] = useState('MEDIUM');
+  const [versionErrorMessage, setVersionErrorMessage] = useState('');
+  const [versionFormError, setVersionFormError] = useState<string | null>(null);
+  const [isSavingVersion, setIsSavingVersion] = useState(false);
 
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
@@ -296,6 +458,22 @@ export default function App() {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 4000);
   };
+
+  // Populates the dataset dropdown in the Assign Rule modal when it opens.
+  useEffect(() => {
+    if (!showAssignmentForm) return;
+    let cancelled = false;
+    listDatasets({ page_size: 200 })
+      .then((resp) => {
+        if (!cancelled) setAssignmentDatasetOptions(resp.items);
+      })
+      .catch(() => {
+        if (!cancelled) setAssignmentDatasetOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showAssignmentForm]);
 
   // --- Real-data fetches, one per read-only screen, triggered on navigation ---------
 
@@ -692,26 +870,431 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScreen]);
 
+  // --- Core decision workflow fetches (this batch) ----------------------------------
+
+  // Data Quality Rules: list rules + assignments, then each rule's versions (needed to
+  // find the current version id for creating new assignments).
+  useEffect(() => {
+    if (currentScreen !== 'quality-rules') return;
+    if (!hasPermission('rules.read')) return;
+
+    let cancelled = false;
+    setRulesLoading(true);
+    setRulesError(null);
+
+    (async () => {
+      const [rulesList, assignments] = await Promise.all([listRules(), listRuleAssignments()]);
+      if (cancelled) return;
+      setRules(rulesList);
+      setRuleAssignments(assignments);
+
+      const versionLists = await Promise.all(
+        rulesList.map((r) => listRuleVersions(r.id).catch(() => [] as RuleVersionResponse[]))
+      );
+      if (cancelled) return;
+      const map: Record<string, RuleVersionResponse[]> = {};
+      rulesList.forEach((r, idx) => {
+        map[r.id] = versionLists[idx];
+      });
+      setRuleVersionsByRuleId(map);
+    })()
+      .catch((err) => {
+        if (!cancelled) setRulesError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setRulesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen]);
+
+  // Validation Workspace: list validation runs for the selected dataset.
+  useEffect(() => {
+    if (currentScreen !== 'validation-workspace') return;
+    if (!selectedDatasetId) return;
+    if (!hasPermission('metadata.read')) return;
+
+    let cancelled = false;
+    setValidationLoading(true);
+    setValidationError(null);
+    setValidationActionError(null);
+
+    listValidationRuns({ dataset_id: selectedDatasetId })
+      .then((runs) => {
+        if (cancelled) return;
+        const datasetName = selectedDataset?.name ?? selectedDatasetId;
+        setValidationRuns(runs.map((r) => mapValidationRun(r, datasetName)));
+      })
+      .catch((err) => {
+        if (!cancelled) setValidationError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setValidationLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedDatasetId]);
+
+  // Validation Run Details: real aggregate counts for the selected run.
+  useEffect(() => {
+    if (currentScreen !== 'validation-run-details') return;
+    if (!selectedValidationRunId) return;
+    if (!hasPermission('metadata.read')) return;
+
+    let cancelled = false;
+    setValidationDetailLoading(true);
+    setValidationDetailError(null);
+    setValidationDetailActionError(null);
+
+    getValidationRun(selectedValidationRunId)
+      .then(async (vr) => {
+        if (cancelled) return;
+        let datasetName = vr.dataset_id;
+        try {
+          const dataset = await getDataset(vr.dataset_id);
+          datasetName = dataset.name;
+        } catch {
+          // keep id fallback
+        }
+        if (cancelled) return;
+        setSelectedValidationRun(mapValidationRun(vr, datasetName));
+      })
+      .catch((err) => {
+        if (!cancelled) setValidationDetailError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setValidationDetailLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedValidationRunId]);
+
+  // Review & Corrections: list reviews, then (N+1, dev-scale only — no bulk endpoint
+  // exists for any of this) each review's validation run (for its dataset name),
+  // issues, and suggestions, merged into one flat Issue[] exactly like the mock data
+  // shape did, so the view's own per-run progress computation needs no changes.
+  useEffect(() => {
+    if (currentScreen !== 'review-corrections') return;
+    if (!hasPermission('review.read')) return;
+
+    let cancelled = false;
+    setReviewRunsLoading(true);
+    setReviewRunsError(null);
+
+    (async () => {
+      const [reviewsList, datasetsResp] = await Promise.all([listReviews(), listDatasets({ page_size: 200 })]);
+      const datasetNameById = new Map(datasetsResp.items.map((d) => [d.id, d.name]));
+
+      const details = await Promise.all(
+        reviewsList.map(async (rr) => {
+          const [vr, issuesList, suggestionsList] = await Promise.all([
+            getValidationRun(rr.validation_run_id).catch(() => null),
+            listReviewIssues(rr.id).catch(() => [] as IssueResponse[]),
+            listReviewSuggestions(rr.id).catch(() => [] as CorrectionSuggestionResponse[]),
+          ]);
+          const datasetName = vr ? datasetNameById.get(vr.dataset_id) ?? vr.dataset_id : rr.validation_run_id;
+          return { rr, datasetName, issuesList, suggestionsList };
+        })
+      );
+
+      if (cancelled) return;
+
+      const mappedRuns: ReviewRun[] = [];
+      const mappedIssues: Issue[] = [];
+      details.forEach(({ rr, datasetName, issuesList, suggestionsList }) => {
+        const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
+        suggestionsList.forEach((s) => {
+          suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
+        });
+
+        const mapped: Issue[] = issuesList.map((issue) => {
+          const candidates = suggestionsByIssueId.get(issue.id) ?? [];
+          const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
+          return {
+            id: issue.id,
+            reviewRunId: issue.review_run_id,
+            recordRef: issue.record_ref,
+            // No name-resolution endpoint for column_id from this domain — shown as a
+            // truncated id rather than fabricating a name.
+            columnName: issue.column_id ? issue.column_id.slice(0, 8) : '—',
+            severity: (issue.severity as Issue['severity']) || 'MEDIUM',
+            originalValue: issue.original_value ?? '',
+            suggestedValue: suggestion?.suggested_value ?? null,
+            suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+            confidence: suggestion?.confidence ?? null,
+            status: (issue.status as Issue['status']) || 'PENDING',
+            finalValue: null,
+            // No row-level failure-detail / rule-join endpoint exists to know which
+            // rule triggered a given issue — shown as unavailable rather than guessed.
+            ruleTriggered: '—',
+            suggestionId: suggestion?.id ?? null,
+          };
+        });
+        mappedIssues.push(...mapped);
+
+        const resolvedCount = mapped.filter((i) => i.status !== 'PENDING').length;
+        mappedRuns.push(mapReviewRun(rr, datasetName, mapped.length, resolvedCount));
+      });
+
+      setReviewRuns(mappedRuns);
+      setIssues(mappedIssues);
+      setSelectedReviewId((prev) => prev ?? mappedRuns[0]?.id ?? null);
+    })()
+      .catch((err) => {
+        if (!cancelled) setReviewRunsError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setReviewRunsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen]);
+
+  // Approval Center: list approvals, then resolve each one's review name, dataset name,
+  // and requester display name (all real, via chained real endpoints).
+  useEffect(() => {
+    if (currentScreen !== 'approval-center') return;
+    if (!hasPermission('approval.read')) return;
+
+    let cancelled = false;
+    setApprovalsLoading(true);
+    setApprovalsError(null);
+
+    (async () => {
+      const [approvalsList, datasetsResp, usersList] = await Promise.all([
+        listApprovals(),
+        listDatasets({ page_size: 200 }),
+        listUsers().catch(() => [] as UserResponse[]),
+      ]);
+      const datasetNameById = new Map(datasetsResp.items.map((d) => [d.id, d.name]));
+      const userNameById = new Map(usersList.map((u) => [u.id, u.full_name || u.username || u.email]));
+
+      const mapped = await Promise.all(
+        approvalsList.map(async (a) => {
+          const review = await getReview(a.review_run_id).catch(() => null);
+          let datasetName = a.review_run_id.slice(0, 8);
+          if (review) {
+            const vr = await getValidationRun(review.validation_run_id).catch(() => null);
+            if (vr) datasetName = datasetNameById.get(vr.dataset_id) ?? vr.dataset_id;
+          }
+          const requestedByName = a.requested_by ? userNameById.get(a.requested_by) ?? a.requested_by : 'Unknown';
+          return mapApprovalRequest(a, review?.name || a.review_run_id.slice(0, 8), datasetName, requestedByName);
+        })
+      );
+
+      if (cancelled) return;
+      setApprovalQueue(mapped);
+    })()
+      .catch((err) => {
+        if (!cancelled) setApprovalsError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setApprovalsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen]);
+
+  // Staging & Publish: there is no list/lookup-by-review endpoint for staging or
+  // publish runs (only get-by-id, and only once you already know the id) — so an
+  // existing staging run from an earlier session cannot be rediscovered here. State
+  // resets when the selected review changes and is populated only by this session's
+  // own create/publish actions, which is an honest reflection of that real gap.
+  useEffect(() => {
+    setCurrentStagingRun(null);
+    setCurrentPublishRun(null);
+    setStagingRecords([]);
+    setStagingError(null);
+    setStagingActionError(null);
+  }, [selectedReviewId]);
+
+  // Refreshes staging records whenever the current staging run or the drift_only
+  // filter changes (drift_only is the backend's own query param, not a client-only
+  // filter).
+  useEffect(() => {
+    if (!currentStagingRun) return;
+    if (!hasPermission('staging.read')) return;
+
+    let cancelled = false;
+    listStagingRecords(currentStagingRun.id, { drift_only: driftOnlyFilter })
+      .then((records) => {
+        if (!cancelled) setStagingRecords(records);
+      })
+      .catch(() => {
+        if (!cancelled) setStagingRecords([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStagingRun, driftOnlyFilter]);
+
   const handleNavigate = (screen: NavScreen) => {
     setCurrentScreen(screen);
     setIsMobileNavOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleToggleRule = (id: string) => {
-    setQualityRules((prev) =>
-      prev.map((r) =>
-        r.id === id
-          ? { ...r, status: r.status === 'active' ? 'inactive' : 'active' }
-          : r
-      )
-    );
-    const target = qualityRules.find((r) => r.id === id);
-    triggerToast(
-      target?.status === 'active'
-        ? `Rule "${target.name}" paused`
-        : `Rule "${target?.name}" activated`
-    );
+  // Toggles a rule between ACTIVE/DISABLED via the real PATCH endpoint (rules.manage).
+  // DISABLED (not "INACTIVE") is what the DB's ck_rules_status check constraint
+  // actually accepts (verified directly against migration 0009 — status is
+  // ACTIVE | DISABLED | PENDING_REVIEW, plain str with no Pydantic enum, so an
+  // invalid value only surfaces as a raw 500 from the DB constraint, not a 422).
+  // Waits for the real response before updating local state — no optimistic flip.
+  const handleToggleRule = async (id: string) => {
+    const target = rules.find((r) => r.id === id);
+    if (!target) return;
+    const nextStatus = target.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
+    try {
+      const updated = await apiUpdateRule(id, { status: nextStatus });
+      setRules((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      triggerToast(nextStatus === 'ACTIVE' ? `Rule "${updated.name}" activated` : `Rule "${updated.name}" paused`);
+    } catch (err) {
+      setRulesActionError(extractErrorMessage(err));
+    }
+  };
+
+  const handleCreateRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewRuleFormError(null);
+    if (!newRuleName.trim()) return;
+
+    let definition: Record<string, unknown>;
+    try {
+      definition = JSON.parse(newRuleDefinitionText || '{}');
+    } catch {
+      setNewRuleFormError('Definition must be valid JSON.');
+      return;
+    }
+
+    const payload: RuleCreateRequest = {
+      name: newRuleName.trim(),
+      description: newRuleDescription.trim() || null,
+      category: newRuleCategory.trim() || null,
+      rule_type: newRuleType,
+      definition,
+      severity: newRuleSeverity,
+      error_message_template: newRuleErrorMessage.trim() || null,
+    };
+
+    setIsSavingRule(true);
+    try {
+      const created = await apiCreateRule(payload);
+      setRules((prev) => [created, ...prev]);
+      setNewRuleName('');
+      setNewRuleDescription('');
+      setNewRuleCategory('');
+      setNewRuleType('COMPLETENESS');
+      setNewRuleSeverity('MEDIUM');
+      setNewRuleDefinitionText('{}');
+      setNewRuleErrorMessage('');
+      setShowRuleCreatorModal(false);
+      triggerToast(`Rule "${created.name}" created`);
+    } catch (err) {
+      setNewRuleFormError(extractErrorMessage(err));
+    } finally {
+      setIsSavingRule(false);
+    }
+  };
+
+  const handleCreateRuleAssignment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAssignmentFormError(null);
+    if (!assignmentRuleId || !assignmentDatasetId) {
+      setAssignmentFormError('Choose a rule and a dataset.');
+      return;
+    }
+    const versions = ruleVersionsByRuleId[assignmentRuleId] ?? [];
+    const currentVersion = versions.find((v) => v.is_current) ?? versions[0];
+    if (!currentVersion) {
+      setAssignmentFormError('This rule has no version to assign yet.');
+      return;
+    }
+
+    const payload: RuleAssignmentCreateRequest = {
+      rule_version_id: currentVersion.id,
+      dataset_id: assignmentDatasetId,
+      assignment_scope: assignmentScope,
+      column_id: assignmentScope === 'SINGLE_COLUMN' ? assignmentColumnId || null : null,
+      column_ids: assignmentScope === 'CROSS_COLUMN' ? assignmentColumnIds : null,
+    };
+
+    setIsSavingAssignment(true);
+    try {
+      const created = await apiCreateRuleAssignment(payload);
+      setRuleAssignments((prev) => [created, ...prev]);
+      setShowAssignmentForm(false);
+      setAssignmentRuleId('');
+      setAssignmentDatasetId('');
+      setAssignmentScope('DATASET_LEVEL');
+      setAssignmentColumnId('');
+      setAssignmentColumnIds([]);
+      triggerToast('Rule assigned');
+    } catch (err) {
+      setAssignmentFormError(extractErrorMessage(err));
+    } finally {
+      setIsSavingAssignment(false);
+    }
+  };
+
+  const handleDisableAssignment = async (assignmentId: string) => {
+    try {
+      const updated = await apiDeleteRuleAssignment(assignmentId);
+      setRuleAssignments((prev) => prev.map((a) => (a.id === assignmentId ? updated : a)));
+      triggerToast('Assignment disabled');
+    } catch (err) {
+      setRulesActionError(extractErrorMessage(err));
+    }
+  };
+
+  const handleCreateRuleVersion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setVersionFormError(null);
+
+    let definition: Record<string, unknown>;
+    try {
+      definition = JSON.parse(versionDefinitionText || '{}');
+    } catch {
+      setVersionFormError('Definition must be valid JSON.');
+      return;
+    }
+
+    setIsSavingVersion(true);
+    try {
+      const created = await apiCreateRuleVersion(versionRuleId, {
+        definition,
+        severity: versionSeverity,
+        error_message_template: versionErrorMessage.trim() || null,
+      });
+      setRuleVersionsByRuleId((prev) => ({
+        ...prev,
+        [versionRuleId]: [created, ...(prev[versionRuleId] ?? []).map((v) => ({ ...v, is_current: false }))],
+      }));
+      setShowVersionForm(false);
+      setVersionDefinitionText('{}');
+      setVersionSeverity('MEDIUM');
+      setVersionErrorMessage('');
+      triggerToast(`Version ${created.version_number} published`);
+    } catch (err) {
+      setVersionFormError(extractErrorMessage(err));
+    } finally {
+      setIsSavingVersion(false);
+    }
   };
 
   const handleSyncSource = (id: string) => {
@@ -742,37 +1325,6 @@ export default function App() {
     setDataSources((prev) => [newSource, ...prev]);
     setCurrentScreen('data-sources');
     triggerToast(`Data source "${newSource.name}" successfully registered`);
-  };
-
-  const handleGenerateRuleSQL = () => {
-    if (!newRulePrompt.trim()) return;
-    setGeneratedSQL(
-      `-- AI Generated constraint for "${newRulePrompt}"\nREGEX_MATCH(column_val, r'^[A-Za-z0-9_-]{3,20}$') AND column_val IS NOT NULL`
-    );
-  };
-
-  const handleCreateRule = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRuleName.trim()) return;
-
-    const newRule: QualityRule = {
-      id: `rule-${Date.now()}`,
-      name: newRuleName.trim(),
-      category: newRuleCategory,
-      description: newRulePrompt || 'Custom validation constraint generated via AI assistant.',
-      status: 'active',
-      appliedDatasetsCount: 1,
-      icon: 'rule',
-      ruleCode: generatedSQL || `VALUE IS NOT NULL`,
-      confidenceThreshold: 99,
-    };
-
-    setQualityRules([newRule, ...qualityRules]);
-    setNewRuleName('');
-    setNewRulePrompt('');
-    setGeneratedSQL('');
-    setShowRuleCreatorModal(false);
-    triggerToast(`Rule "${newRule.name}" created and deployed`);
   };
 
   const handleSendCopilot = (e: React.FormEvent) => {
@@ -810,157 +1362,245 @@ export default function App() {
     }, 600);
   };
 
-  // Review & Corrections Actions
-  const handleAcceptIssue = (issueId: string) => {
-    setIssues((prev) =>
-      prev.map((i) =>
-        i.id === issueId && i.status === 'PENDING'
-          ? { ...i, status: 'RESOLVED', finalValue: i.suggestedValue ?? i.originalValue }
-          : i
-      )
-    );
-    triggerToast('Suggestion accepted');
+  // Review & Corrections Actions — every one of these waits for the real response
+  // before touching local state; on success the specific issue is updated from the
+  // server's own CorrectionResponse (not guessed), never optimistically beforehand.
+  const withIssuePending = async (issueId: string, fn: () => Promise<void>) => {
+    setReviewActionPendingIds((prev) => [...prev, issueId]);
+    setReviewActionError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setReviewActionError(extractErrorMessage(err));
+    } finally {
+      setReviewActionPendingIds((prev) => prev.filter((id) => id !== issueId));
+    }
   };
 
-  const handleEditIssue = (issueId: string, finalValue: string) => {
-    setIssues((prev) =>
-      prev.map((i) => (i.id === issueId ? { ...i, status: 'RESOLVED', finalValue } : i))
-    );
-    triggerToast('Correction updated with custom value');
+  const applyCorrection = (issueId: string, status: Issue['status'], finalValue: string | null) => {
+    setIssues((prev) => prev.map((i) => (i.id === issueId ? { ...i, status, finalValue } : i)));
   };
 
-  const handleRejectIssue = (issueId: string) => {
-    setIssues((prev) =>
-      prev.map((i) =>
-        i.id === issueId ? { ...i, status: 'RESOLVED', finalValue: i.originalValue } : i
-      )
-    );
-    triggerToast('Suggestion rejected — original value kept');
-  };
+  const handleAcceptIssue = (issueId: string) =>
+    withIssuePending(issueId, async () => {
+      const issue = issues.find((i) => i.id === issueId);
+      if (!issue?.suggestionId) return;
+      const correction = await apiAcceptSuggestion(issue.suggestionId);
+      applyCorrection(issueId, 'RESOLVED', correction.final_value);
+      triggerToast('Suggestion accepted');
+    });
 
-  const handleSkipIssue = (issueId: string) => {
-    setIssues((prev) =>
-      prev.map((i) => (i.id === issueId ? { ...i, status: 'SKIPPED' } : i))
-    );
-    triggerToast('Issue skipped');
-  };
+  const handleEditIssue = (issueId: string, finalValue: string) =>
+    withIssuePending(issueId, async () => {
+      const issue = issues.find((i) => i.id === issueId);
+      // Editing an existing suggestion's value uses the suggestion-scoped endpoint;
+      // an issue with no suggestion yet has nothing to edit, so it's a direct
+      // correction instead — both are real endpoints, chosen by what actually exists.
+      const correction = issue?.suggestionId
+        ? await apiEditSuggestion(issue.suggestionId, { final_value: finalValue })
+        : await apiCorrectIssue(issueId, { final_value: finalValue });
+      applyCorrection(issueId, 'RESOLVED', correction.final_value);
+      triggerToast('Correction updated with custom value');
+    });
 
-  const handleBulkAccept = (issueIds: string[]) => {
+  const handleRejectIssue = (issueId: string) =>
+    withIssuePending(issueId, async () => {
+      const issue = issues.find((i) => i.id === issueId);
+      if (!issue) return;
+      const correction = issue.suggestionId
+        ? await apiRejectSuggestion(issue.suggestionId, {})
+        : // No suggestion to reject — achieve the same "keep original value" outcome
+          // via a direct correction instead of inventing a reject-with-no-suggestion call.
+          await apiCorrectIssue(issueId, { final_value: issue.originalValue });
+      applyCorrection(issueId, 'RESOLVED', correction.final_value);
+      triggerToast('Suggestion rejected — original value kept');
+    });
+
+  const handleSkipIssue = (issueId: string) =>
+    withIssuePending(issueId, async () => {
+      if (!selectedReviewId) return;
+      await apiBulkReviewAction(selectedReviewId, { issue_ids: [issueId], action: 'skip' });
+      setIssues((prev) => prev.map((i) => (i.id === issueId ? { ...i, status: 'SKIPPED', finalValue: null } : i)));
+      triggerToast('Issue skipped');
+    });
+
+  // bulk-action only supports skip/reject server-side — there is no bulk-accept
+  // endpoint, so "accept" is genuinely N real per-suggestion calls, not one bulk call.
+  const handleBulkAccept = async (issueIds: string[]) => {
     if (issueIds.length === 0) return;
-    setIssues((prev) =>
-      prev.map((i) =>
-        issueIds.includes(i.id) && i.status === 'PENDING'
-          ? { ...i, status: 'RESOLVED', finalValue: i.suggestedValue ?? i.originalValue }
-          : i
-      )
-    );
-    triggerToast(`${issueIds.length} issue${issueIds.length > 1 ? 's' : ''} accepted`);
+    setReviewActionPendingIds((prev) => [...prev, ...issueIds]);
+    setReviewActionError(null);
+    try {
+      const targets = issueIds
+        .map((id) => issues.find((i) => i.id === id))
+        .filter((i): i is Issue => !!i && !!i.suggestionId);
+      const results = await Promise.allSettled(
+        targets.map((issue) => apiAcceptSuggestion(issue.suggestionId as string))
+      );
+      results.forEach((result, idx) => {
+        if (result.status === 'fulfilled') {
+          applyCorrection(targets[idx].id, 'RESOLVED', result.value.final_value);
+        }
+      });
+      const failures = results.filter((r) => r.status === 'rejected');
+      if (failures.length > 0) {
+        setReviewActionError(`${failures.length} of ${targets.length} accept${targets.length === 1 ? '' : 's'} failed.`);
+      } else {
+        triggerToast(`${targets.length} issue${targets.length === 1 ? '' : 's'} accepted`);
+      }
+    } finally {
+      setReviewActionPendingIds((prev) => prev.filter((id) => !issueIds.includes(id)));
+    }
   };
 
-  const handleBulkReject = (issueIds: string[]) => {
-    if (issueIds.length === 0) return;
-    setIssues((prev) =>
-      prev.map((i) =>
-        issueIds.includes(i.id) && i.status === 'PENDING'
-          ? { ...i, status: 'RESOLVED', finalValue: i.originalValue }
-          : i
-      )
-    );
-    triggerToast(`${issueIds.length} issue${issueIds.length > 1 ? 's' : ''} rejected`);
+  const handleBulkReject = async (issueIds: string[]) => {
+    if (issueIds.length === 0 || !selectedReviewId) return;
+    setReviewActionPendingIds((prev) => [...prev, ...issueIds]);
+    setReviewActionError(null);
+    try {
+      await apiBulkReviewAction(selectedReviewId, { issue_ids: issueIds, action: 'reject' });
+      setIssues((prev) =>
+        prev.map((i) => (issueIds.includes(i.id) ? { ...i, status: 'RESOLVED', finalValue: i.originalValue } : i))
+      );
+      triggerToast(`${issueIds.length} issue${issueIds.length > 1 ? 's' : ''} rejected`);
+    } catch (err) {
+      setReviewActionError(extractErrorMessage(err));
+    } finally {
+      setReviewActionPendingIds((prev) => prev.filter((id) => !issueIds.includes(id)));
+    }
   };
 
-  const handleSubmitForApproval = (reviewRunId: string) => {
-    const run = reviewRuns.find((r) => r.id === reviewRunId);
-    if (!run) return;
-
-    const runIssues = issues.filter((i) => i.reviewRunId === reviewRunId);
-    const stillPending = runIssues.some((i) => i.status === 'PENDING');
-    if (stillPending) return;
-
-    const resolvedCount = runIssues.filter((i) => i.status === 'RESOLVED').length;
-
-    setReviewRuns((prev) =>
-      prev.map((r) =>
-        r.id === reviewRunId
-          ? { ...r, status: 'READY_FOR_APPROVAL', resolvedIssues: resolvedCount }
-          : r
-      )
-    );
-
-    setApprovalQueue((prev) => [
-      {
-        id: `aq-${Date.now()}`,
-        reviewRunName: run.validationRunLabel,
-        datasetName: run.datasetName,
-        status: 'PENDING',
-        affectedIssueCount: runIssues.length,
-        affectedRecordCount: runIssues.length,
-        requestedBy: currentUser?.name ?? 'Unknown',
-        requestedAt: 'Just now',
-        decidedCount: 0,
-        remainingCount: runIssues.length,
-      },
-      ...prev,
-    ]);
-
-    triggerToast(`"${run.name}" submitted for approval`);
+  // Generates rule-based/AI suggestions for whichever of this review's issues don't
+  // have one yet, then refetches that review's issues+suggestions to pick them up
+  // (no per-issue response is returned, so a refetch is the only way to see them).
+  const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
+  const handleGenerateSuggestions = async (reviewRunId: string) => {
+    setIsGeneratingSuggestions(true);
+    setReviewActionError(null);
+    try {
+      const result = await apiGenerateReviewSuggestions(reviewRunId);
+      const [issuesList, suggestionsList] = await Promise.all([
+        listReviewIssues(reviewRunId),
+        listReviewSuggestions(reviewRunId),
+      ]);
+      const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
+      suggestionsList.forEach((s) => {
+        suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
+      });
+      const refreshed: Issue[] = issuesList.map((issue) => {
+        const candidates = suggestionsByIssueId.get(issue.id) ?? [];
+        const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
+        return {
+          id: issue.id,
+          reviewRunId: issue.review_run_id,
+          recordRef: issue.record_ref,
+          columnName: issue.column_id ? issue.column_id.slice(0, 8) : '—',
+          severity: (issue.severity as Issue['severity']) || 'MEDIUM',
+          originalValue: issue.original_value ?? '',
+          suggestedValue: suggestion?.suggested_value ?? null,
+          suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+          confidence: suggestion?.confidence ?? null,
+          status: (issue.status as Issue['status']) || 'PENDING',
+          finalValue: null,
+          ruleTriggered: '—',
+          suggestionId: suggestion?.id ?? null,
+        };
+      });
+      setIssues((prev) => [...prev.filter((i) => i.reviewRunId !== reviewRunId), ...refreshed]);
+      triggerToast(
+        `${result.generated_count} suggestion${result.generated_count === 1 ? '' : 's'} generated` +
+          (result.issues_with_no_suggestion_count > 0
+            ? ` (${result.issues_with_no_suggestion_count} issue${result.issues_with_no_suggestion_count === 1 ? '' : 's'} still without one)`
+            : '')
+      );
+    } catch (err) {
+      setReviewActionError(extractErrorMessage(err));
+    } finally {
+      setIsGeneratingSuggestions(false);
+    }
   };
 
-  // Approval Center Actions
-  const handleApproveRequest = (id: string, comment: string) => {
-    const target = approvalQueue.find((r) => r.id === id);
-    setApprovalQueue((prev) =>
-      prev.map((r) =>
-        r.id === id
-          ? { ...r, status: 'APPROVED', decidedCount: r.affectedIssueCount, remainingCount: 0 }
-          : r
-      )
-    );
-    triggerToast(
-      comment
-        ? `"${target?.reviewRunName}" approved — "${comment}"`
-        : `"${target?.reviewRunName}" approved`
-    );
+  const handleSubmitForApproval = async (reviewRunId: string) => {
+    setReviewActionError(null);
+    try {
+      const approval = await apiSubmitApproval(reviewRunId);
+      setReviewRuns((prev) => prev.map((r) => (r.id === reviewRunId ? { ...r, status: 'READY_FOR_APPROVAL' } : r)));
+      const run = reviewRuns.find((r) => r.id === reviewRunId);
+      setApprovalQueue((prev) => [
+        mapApprovalRequest(approval, run?.name ?? reviewRunId, run?.datasetName ?? '', currentUser?.name ?? 'You'),
+        ...prev,
+      ]);
+      triggerToast(`"${run?.name ?? reviewRunId}" submitted for approval`);
+    } catch (err) {
+      setReviewActionError(extractErrorMessage(err));
+    }
   };
 
-  const handleRejectRequest = (id: string, comment: string) => {
-    const target = approvalQueue.find((r) => r.id === id);
-    setApprovalQueue((prev) =>
-      prev.map((r) =>
-        r.id === id
-          ? { ...r, status: 'REJECTED', decidedCount: r.affectedIssueCount, remainingCount: 0 }
-          : r
-      )
-    );
-    triggerToast(
-      comment
-        ? `"${target?.reviewRunName}" rejected — "${comment}"`
-        : `"${target?.reviewRunName}" rejected`
-    );
+  // Approval Center Actions — approval.decide is a separate trust boundary from
+  // review.edit; the UI hides these actions entirely without approval.decide (see
+  // ApprovalCenterView), and the backend independently enforces the same check.
+  // The Approval Center UI (unchanged from mock) has no per-issue picker — it decides
+  // an approval request as a whole, so every issue currently in its review run is sent.
+  // Fetched fresh here rather than relying on Review & Corrections' `issues` state,
+  // which may not be loaded if the user navigated straight to Approval Center.
+  const decideApproval = async (
+    id: string,
+    comment: string,
+    decide: (issueIds: string[]) => Promise<ApprovalRequestResponse>
+  ) => {
+    setApprovalActionPendingId(id);
+    setApprovalActionError(null);
+    try {
+      const target = approvalQueue.find((r) => r.id === id);
+      if (!target?.reviewRunId) throw new Error('Missing review run reference for this approval.');
+      const reviewIssues = await listReviewIssues(target.reviewRunId);
+      const updated = await decide(reviewIssues.map((i) => i.id));
+      setApprovalQueue((prev) =>
+        prev.map((r) => (r.id === id ? mapApprovalRequest(updated, r.reviewRunName, r.datasetName, r.requestedBy) : r))
+      );
+      return { target, comment };
+    } finally {
+      setApprovalActionPendingId(null);
+    }
+  };
+
+  const handleApproveRequest = async (id: string, comment: string) => {
+    try {
+      const { target } = await decideApproval(id, comment, (issue_ids) =>
+        apiApproveApproval(id, { issue_ids, comment: comment || null })
+      );
+      triggerToast(comment ? `"${target?.reviewRunName}" approved — "${comment}"` : `"${target?.reviewRunName}" approved`);
+    } catch (err) {
+      setApprovalActionError(extractErrorMessage(err));
+    }
+  };
+
+  const handleRejectRequest = async (id: string, comment: string) => {
+    try {
+      const { target } = await decideApproval(id, comment, (issue_ids) =>
+        apiRejectApproval(id, { issue_ids, comment: comment || null })
+      );
+      triggerToast(comment ? `"${target?.reviewRunName}" rejected — "${comment}"` : `"${target?.reviewRunName}" rejected`);
+    } catch (err) {
+      setApprovalActionError(extractErrorMessage(err));
+    }
   };
 
   // Validation Workspace Actions
-  const handleRunValidation = (datasetName: string) => {
-    // "Customer Data" (the app's demo dataset context) maps to the
-    // discovered users_master table.
-    const matchingDataset = explorerDatasets.find((d) => d.name === 'users_master');
-
-    const newRun: ValidationRun = {
-      id: `vr-${Date.now()}`,
-      datasetName,
-      status: 'QUEUED',
-      totalRows: matchingDataset?.rowCountEstimate ?? 0,
-      passedRows: 0,
-      warningRows: 0,
-      failedRows: 0,
-      qualityScore: null,
-      startedAt: 'Not started',
-      completedAt: 'Not started',
-      durationMs: null,
-    };
-
-    setValidationRuns((prev) => [newRun, ...prev]);
-    triggerToast(`Validation run queued for "${datasetName}"`);
+  const handleRunValidation = async () => {
+    if (!selectedDatasetId) return;
+    setIsTriggeringValidation(true);
+    setValidationActionError(null);
+    try {
+      const created = await createValidationRun(selectedDatasetId, {});
+      const datasetName = selectedDataset?.name ?? selectedDatasetId;
+      setValidationRuns((prev) => [mapValidationRun(created, datasetName), ...prev]);
+      triggerToast(`Validation run queued for "${datasetName}"`);
+    } catch (err) {
+      setValidationActionError(extractErrorMessage(err));
+    } finally {
+      setIsTriggeringValidation(false);
+    }
   };
 
   const handleSelectValidationRun = (runId: string) => {
@@ -968,36 +1608,79 @@ export default function App() {
     handleNavigate('validation-run-details');
   };
 
+  const handleCancelValidationJob = async () => {
+    if (!selectedValidationRun?.jobId) return;
+    setIsCancellingValidationJob(true);
+    setValidationDetailActionError(null);
+    try {
+      await apiCancelJob(selectedValidationRun.jobId);
+      const refreshed = await getValidationRun(selectedValidationRun.id);
+      setSelectedValidationRun(mapValidationRun(refreshed, selectedValidationRun.datasetName));
+      triggerToast('Validation run cancelled');
+    } catch (err) {
+      setValidationDetailActionError(extractErrorMessage(err));
+    } finally {
+      setIsCancellingValidationJob(false);
+    }
+  };
+
   // Staging & Publish Actions
-  const handlePublish = () => {
-    const current = stagingRuns.find((s) => s.isCurrent);
-    if (!current || current.status !== 'READY') return;
+  const handleCreateStagingRun = async () => {
+    if (!selectedReviewId) return;
+    setIsStagingActionPending(true);
+    setStagingActionError(null);
+    try {
+      const created = await apiCreateStagingRun(selectedReviewId);
+      setCurrentStagingRun(created);
+      setCurrentPublishRun(null);
+      triggerToast('Staging run created');
+    } catch (err) {
+      setStagingActionError(extractErrorMessage(err));
+    } finally {
+      setIsStagingActionPending(false);
+    }
+  };
 
-    const newPublish: PublishRun = {
-      id: `pb-${Date.now()}`,
-      stagingRunAttempt: current.attemptNumber,
-      status: 'PUBLISHING',
-      targetType: 'FILE_EXPORT',
-      targetReference: `s3://datacraft-exports/customer_data/attempt-${current.attemptNumber}.csv`,
-      publishedRecordCount: null,
-      driftAcknowledged: current.hasSourceDrift,
-      errorMessage: null,
-      createdAt: 'Just now',
-    };
-
-    setPublishRuns((prev) => [newPublish, ...prev]);
-    triggerToast('Publishing to file export target...');
-
-    setTimeout(() => {
-      setPublishRuns((prev) =>
-        prev.map((p) =>
-          p.id === newPublish.id
-            ? { ...p, status: 'PUBLISHED', publishedRecordCount: current.recordCount }
-            : p
-        )
+  // Always allowed to trigger — the backend itself creates the publish_run at PENDING
+  // regardless of drift, and only the async job refuses to proceed past PENDING until
+  // drift is acknowledged. The UI reflects that pending-on-drift state below rather
+  // than pretending publishing completed.
+  const handlePublish = async () => {
+    if (!currentStagingRun) return;
+    setIsStagingActionPending(true);
+    setStagingActionError(null);
+    try {
+      const trigger = await apiTriggerPublish(currentStagingRun.id, {
+        target_type: 'FILE_EXPORT',
+        target_reference: `s3://datacraft-exports/${currentStagingRun.dataset_id}/attempt-${currentStagingRun.attempt_number}.csv`,
+      });
+      const publishRun = await getPublishRun(trigger.publish_run_id);
+      setCurrentPublishRun(publishRun);
+      triggerToast(
+        currentStagingRun.has_source_drift
+          ? 'Publish created — blocked pending drift acknowledgment'
+          : 'Publishing to file export target...'
       );
-      triggerToast(`Published ${current.recordCount.toLocaleString()} records successfully`);
-    }, 1500);
+    } catch (err) {
+      setStagingActionError(extractErrorMessage(err));
+    } finally {
+      setIsStagingActionPending(false);
+    }
+  };
+
+  const handleAcknowledgeDrift = async () => {
+    if (!currentPublishRun) return;
+    setIsStagingActionPending(true);
+    setStagingActionError(null);
+    try {
+      const updated = await apiAcknowledgeDrift(currentPublishRun.id, {});
+      setCurrentPublishRun(updated);
+      triggerToast('Drift acknowledged — publish will continue');
+    } catch (err) {
+      setStagingActionError(extractErrorMessage(err));
+    } finally {
+      setIsStagingActionPending(false);
+    }
   };
 
   // User Management Actions
@@ -1194,63 +1877,154 @@ export default function App() {
               />
             )}
 
-          {currentScreen === 'validation-workspace' && (
-            <ValidationWorkspaceView
-              onNavigate={handleNavigate}
-              validationRuns={validationRuns}
-              onRunValidation={handleRunValidation}
-              onSelectRun={handleSelectValidationRun}
-            />
-          )}
+          {currentScreen === 'validation-workspace' &&
+            (!selectedDatasetId ? (
+              <ScreenPrompt message="Select a dataset from Data Explorer to run or view its validations." />
+            ) : (
+              renderGated(
+                hasPermission('metadata.read'),
+                'You need the metadata.read permission to view validation runs.',
+                validationLoading,
+                'Loading validation runs…',
+                validationError,
+                <ValidationWorkspaceView
+                  onNavigate={handleNavigate}
+                  datasetName={selectedDataset?.name ?? selectedDatasetId}
+                  validationRuns={validationRuns}
+                  onRunValidation={handleRunValidation}
+                  onSelectRun={handleSelectValidationRun}
+                  canTriggerValidation={hasPermission('validation.run')}
+                  isTriggering={isTriggeringValidation}
+                  actionError={validationActionError}
+                />
+              )
+            ))}
 
-          {currentScreen === 'validation-run-details' && (
-            <ValidationRunDetailsView
-              onNavigate={handleNavigate}
-              run={validationRuns.find((r) => r.id === selectedValidationRunId)}
-            />
-          )}
+          {currentScreen === 'validation-run-details' &&
+            renderGated(
+              hasPermission('metadata.read'),
+              'You need the metadata.read permission to view this validation run.',
+              validationDetailLoading,
+              'Loading validation run…',
+              validationDetailError,
+              <ValidationRunDetailsView
+                onNavigate={handleNavigate}
+                run={selectedValidationRun ?? undefined}
+                canCancel={hasPermission('discovery.run')}
+                isCancelling={isCancellingValidationJob}
+                onCancel={handleCancelValidationJob}
+                actionError={validationDetailActionError}
+              />
+            )}
 
-          {currentScreen === 'quality-rules' && (
-            <QualityRulesView
-              onNavigate={handleNavigate}
-              onOpenRuleCreator={() => setShowRuleCreatorModal(true)}
-              rules={qualityRules}
-              onToggleRule={handleToggleRule}
-            />
-          )}
+          {currentScreen === 'quality-rules' &&
+            renderGated(
+              hasPermission('rules.read'),
+              'You need the rules.read permission to view quality rules.',
+              rulesLoading,
+              'Loading rules…',
+              rulesError,
+              <QualityRulesView
+                onNavigate={handleNavigate}
+                onOpenRuleCreator={() => setShowRuleCreatorModal(true)}
+                rules={rules}
+                ruleAssignments={ruleAssignments}
+                ruleVersionIdsByRuleId={Object.fromEntries(
+                  Object.entries(ruleVersionsByRuleId).map(([ruleId, versions]) => [ruleId, versions.map((v) => v.id)])
+                )}
+                canManageRules={hasPermission('rules.manage')}
+                canManageAssignments={hasPermission('rule_assignments.manage')}
+                onToggleRule={handleToggleRule}
+                onDisableAssignment={handleDisableAssignment}
+                onOpenAssignmentForm={(ruleId) => {
+                  setAssignmentRuleId(ruleId);
+                  setShowAssignmentForm(true);
+                }}
+                onOpenVersionForm={(ruleId) => {
+                  setVersionRuleId(ruleId);
+                  setShowVersionForm(true);
+                }}
+                actionError={rulesActionError}
+              />
+            )}
 
-          {currentScreen === 'review-corrections' && (
-            <ReviewCorrectionsView
-              onNavigate={handleNavigate}
-              reviewRuns={reviewRuns}
-              issues={issues}
-              onAcceptIssue={handleAcceptIssue}
-              onEditIssue={handleEditIssue}
-              onRejectIssue={handleRejectIssue}
-              onSkipIssue={handleSkipIssue}
-              onBulkAccept={handleBulkAccept}
-              onBulkReject={handleBulkReject}
-              onSubmitForApproval={handleSubmitForApproval}
-            />
-          )}
+          {currentScreen === 'review-corrections' &&
+            renderGated(
+              hasPermission('review.read'),
+              'You need the review.read permission to view reviews.',
+              reviewRunsLoading,
+              'Loading reviews…',
+              reviewRunsError,
+              <ReviewCorrectionsView
+                onNavigate={handleNavigate}
+                reviewRuns={reviewRuns}
+                selectedReviewId={selectedReviewId}
+                onSelectReview={setSelectedReviewId}
+                issues={issues}
+                canEdit={hasPermission('review.edit')}
+                actionError={reviewActionError}
+                pendingIssueIds={reviewActionPendingIds}
+                onGenerateSuggestions={handleGenerateSuggestions}
+                isGeneratingSuggestions={isGeneratingSuggestions}
+                onAcceptIssue={handleAcceptIssue}
+                onEditIssue={handleEditIssue}
+                onRejectIssue={handleRejectIssue}
+                onSkipIssue={handleSkipIssue}
+                onBulkAccept={handleBulkAccept}
+                onBulkReject={handleBulkReject}
+                onSubmitForApproval={handleSubmitForApproval}
+              />
+            )}
 
-          {currentScreen === 'approval-center' && (
-            <ApprovalCenterView
-              onNavigate={handleNavigate}
-              approvalQueue={approvalQueue}
-              onApprove={handleApproveRequest}
-              onReject={handleRejectRequest}
-            />
-          )}
+          {currentScreen === 'approval-center' &&
+            renderGated(
+              hasPermission('approval.read'),
+              'You need the approval.read permission to view the approval center.',
+              approvalsLoading,
+              'Loading approval requests…',
+              approvalsError,
+              <ApprovalCenterView
+                onNavigate={handleNavigate}
+                approvalQueue={approvalQueue}
+                canDecide={hasPermission('approval.decide')}
+                pendingId={approvalActionPendingId}
+                actionError={approvalActionError}
+                onApprove={handleApproveRequest}
+                onReject={handleRejectRequest}
+                onSelect={(id) => {
+                  const item = approvalQueue.find((a) => a.id === id);
+                  if (item?.reviewRunId) setSelectedReviewId(item.reviewRunId);
+                }}
+              />
+            )}
 
-          {currentScreen === 'staging-publish' && (
-            <StagingPublishView
-              onNavigate={handleNavigate}
-              stagingRuns={stagingRuns}
-              publishRuns={publishRuns}
-              onPublish={handlePublish}
-            />
-          )}
+          {currentScreen === 'staging-publish' &&
+            (!selectedReviewId ? (
+              <ScreenPrompt message="Select a review from Review & Corrections or Approval Center to stage and publish it." />
+            ) : (
+              renderGated(
+                hasPermission('staging.read'),
+                'You need the staging.read permission to view staging & publish.',
+                stagingLoading,
+                'Loading staging run…',
+                stagingError,
+                <StagingPublishView
+                  onNavigate={handleNavigate}
+                  stagingRun={currentStagingRun}
+                  stagingRecords={stagingRecords}
+                  driftOnly={driftOnlyFilter}
+                  onToggleDriftOnly={setDriftOnlyFilter}
+                  publishRun={currentPublishRun}
+                  canCreateStaging={hasPermission('staging.create')}
+                  canPublish={hasPermission('publish.execute')}
+                  isActionPending={isStagingActionPending}
+                  actionError={stagingActionError}
+                  onCreateStagingRun={handleCreateStagingRun}
+                  onPublish={handlePublish}
+                  onAcknowledgeDrift={handleAcknowledgeDrift}
+                />
+              )
+            ))}
 
           {currentScreen === 'data-lineage' &&
             (!selectedDatasetId ? (
@@ -1319,22 +2093,18 @@ export default function App() {
         </main>
       </div>
 
-      {/* Guided Rule Creator Modal */}
+      {/* Create Rule Modal — real fields matching RuleCreateRequest exactly */}
       {showRuleCreatorModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
-          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-xl w-full p-6 space-y-6 animate-in zoom-in-95 duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-xl w-full p-6 space-y-6 animate-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-surface-container pb-4">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-md bg-surface-container-high text-primary flex items-center justify-center">
-                  <span className="material-symbols-outlined text-2xl">auto_awesome</span>
+                  <span className="material-symbols-outlined text-2xl">rule</span>
                 </div>
                 <div>
-                  <h3 className="font-editorial text-xl font-bold text-on-surface">
-                    Guided Rule Creator
-                  </h3>
-                  <p className="text-xs text-outline">
-                    Synthesize custom SQL & regex constraints with AI guidance.
-                  </p>
+                  <h3 className="font-editorial text-xl font-bold text-on-surface">Create Rule</h3>
+                  <p className="text-xs text-outline">Deploys a new rule with its first version.</p>
                 </div>
               </div>
               <button
@@ -1346,6 +2116,13 @@ export default function App() {
             </div>
 
             <form onSubmit={handleCreateRule} className="space-y-4">
+              {newRuleFormError && (
+                <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3.5 py-2.5 text-xs text-error">
+                  <span className="material-symbols-outlined text-base shrink-0">error</span>
+                  <span>{newRuleFormError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                   Rule Name
@@ -1355,68 +2132,101 @@ export default function App() {
                   required
                   value={newRuleName}
                   onChange={(e) => setNewRuleName(e.target.value)}
-                  placeholder="e.g. Valid US Phone Number Standardizer"
+                  placeholder="e.g. Valid US Phone Number Format"
                   className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
-                  Category
+                  Rule Type
                 </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {(['formatting', 'uniqueness', 'completeness', 'consistency'] as const).map((cat) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setNewRuleCategory(cat)}
-                      className={`p-2.5 rounded-md border text-[11px] font-semibold capitalize transition-all cursor-pointer ${
-                        newRuleCategory === cat
-                          ? 'bg-primary text-white border-primary'
-                          : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
-                      }`}
-                    >
-                      {cat}
-                    </button>
-                  ))}
+                <div className="grid grid-cols-3 gap-2">
+                  {(['COMPLETENESS', 'UNIQUENESS', 'DUPLICATE', 'RANGE', 'PATTERN', 'CROSS_COLUMN'] as const).map(
+                    (type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() => setNewRuleType(type)}
+                        className={`p-2 rounded-md border text-[10px] font-semibold transition-all cursor-pointer ${
+                          newRuleType === type
+                            ? 'bg-primary text-white border-primary'
+                            : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
+                        }`}
+                      >
+                        {type}
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                    Category (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={newRuleCategory}
+                    onChange={(e) => setNewRuleCategory(e.target.value)}
+                    placeholder="e.g. formatting"
+                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                    Severity
+                  </label>
+                  <select
+                    value={newRuleSeverity}
+                    onChange={(e) => setNewRuleSeverity(e.target.value)}
+                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                  >
+                    {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
-                  Describe Validation Constraint in Plain English
+                  Description (optional)
                 </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={newRulePrompt}
-                    onChange={(e) => setNewRulePrompt(e.target.value)}
-                    placeholder="e.g. Ensure customer tax ID starts with TX- followed by 6 numbers"
-                    className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleGenerateRuleSQL}
-                    className="bg-surface-container-high hover:bg-outline-variant text-primary px-4 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer"
-                  >
-                    Generate SQL
-                  </button>
-                </div>
+                <textarea
+                  rows={2}
+                  value={newRuleDescription}
+                  onChange={(e) => setNewRuleDescription(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md p-3 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
               </div>
 
-              {generatedSQL && (
-                <div>
-                  <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
-                    Generated Rule Code (SQL & Regex)
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={generatedSQL}
-                    onChange={(e) => setGeneratedSQL(e.target.value)}
-                    className="w-full font-mono bg-surface-container-low border border-outline-variant rounded-md p-3 text-xs text-tertiary focus:outline-none focus:bg-white focus:border-primary"
-                  />
-                </div>
-              )}
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Definition (raw JSON — no fixed shape is enforced by the backend)
+                </label>
+                <textarea
+                  rows={4}
+                  value={newRuleDefinitionText}
+                  onChange={(e) => setNewRuleDefinitionText(e.target.value)}
+                  className="w-full font-mono bg-surface-container-low border border-outline-variant rounded-md p-3 text-xs text-tertiary focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Error Message Template (optional)
+                </label>
+                <input
+                  type="text"
+                  value={newRuleErrorMessage}
+                  onChange={(e) => setNewRuleErrorMessage(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
 
               <div className="pt-4 border-t border-surface-container flex items-center justify-end gap-3">
                 <button
@@ -1428,9 +2238,245 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient"
+                  disabled={isSavingRule}
+                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
                 >
-                  Deploy Rule
+                  {isSavingRule ? 'Creating…' : 'Create Rule'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Assign Rule to Dataset Modal (rule_assignments.manage-gated) */}
+      {showAssignmentForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-md w-full p-6 space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-surface-container pb-4">
+              <h3 className="font-editorial text-xl font-bold text-on-surface">Assign Rule to Dataset</h3>
+              <button
+                onClick={() => setShowAssignmentForm(false)}
+                className="p-1 text-outline hover:text-on-surface rounded transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateRuleAssignment} className="space-y-4">
+              {assignmentFormError && (
+                <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3.5 py-2.5 text-xs text-error">
+                  <span className="material-symbols-outlined text-base shrink-0">error</span>
+                  <span>{assignmentFormError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">Rule</label>
+                <select
+                  value={assignmentRuleId}
+                  onChange={(e) => setAssignmentRuleId(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                >
+                  <option value="">Select a rule…</option>
+                  {rules.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Dataset
+                </label>
+                <select
+                  value={assignmentDatasetId}
+                  onChange={async (e) => {
+                    setAssignmentDatasetId(e.target.value);
+                    setAssignmentColumnId('');
+                    setAssignmentColumnIds([]);
+                    if (e.target.value) {
+                      try {
+                        setAssignmentDatasetColumns(await listDatasetColumns(e.target.value));
+                      } catch {
+                        setAssignmentDatasetColumns([]);
+                      }
+                    }
+                  }}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                >
+                  <option value="">Select a dataset…</option>
+                  {assignmentDatasetOptions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">Scope</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['SINGLE_COLUMN', 'DATASET_LEVEL', 'CROSS_COLUMN'] as const).map((scope) => (
+                    <button
+                      key={scope}
+                      type="button"
+                      onClick={() => setAssignmentScope(scope)}
+                      className={`p-2 rounded-md border text-[10px] font-semibold transition-all cursor-pointer ${
+                        assignmentScope === scope
+                          ? 'bg-primary text-white border-primary'
+                          : 'bg-surface-container-low border-outline-variant text-on-surface-variant hover:bg-surface-container'
+                      }`}
+                    >
+                      {scope.replace('_', ' ')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {assignmentScope === 'SINGLE_COLUMN' && (
+                <div>
+                  <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                    Column
+                  </label>
+                  <select
+                    value={assignmentColumnId}
+                    onChange={(e) => setAssignmentColumnId(e.target.value)}
+                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                  >
+                    <option value="">Select a column…</option>
+                    {assignmentDatasetColumns.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {assignmentScope === 'CROSS_COLUMN' && (
+                <div>
+                  <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                    Columns (select at least 2)
+                  </label>
+                  <select
+                    multiple
+                    value={assignmentColumnIds}
+                    onChange={(e) =>
+                      setAssignmentColumnIds(Array.from(e.target.selectedOptions).map((o) => o.value))
+                    }
+                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                    size={Math.min(6, Math.max(3, assignmentDatasetColumns.length))}
+                  >
+                    {assignmentDatasetColumns.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="pt-4 border-t border-surface-container flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowAssignmentForm(false)}
+                  className="px-4 py-2.5 rounded-md border border-outline-variant text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingAssignment}
+                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
+                >
+                  {isSavingAssignment ? 'Assigning…' : 'Assign'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* New Rule Version Modal (rules.manage-gated) */}
+      {showVersionForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-md w-full p-6 space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-surface-container pb-4">
+              <h3 className="font-editorial text-xl font-bold text-on-surface">Publish New Version</h3>
+              <button
+                onClick={() => setShowVersionForm(false)}
+                className="p-1 text-outline hover:text-on-surface rounded transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateRuleVersion} className="space-y-4">
+              {versionFormError && (
+                <div className="flex items-start gap-2 rounded-md border border-error/30 bg-error/10 px-3.5 py-2.5 text-xs text-error">
+                  <span className="material-symbols-outlined text-base shrink-0">error</span>
+                  <span>{versionFormError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Definition (raw JSON)
+                </label>
+                <textarea
+                  rows={4}
+                  value={versionDefinitionText}
+                  onChange={(e) => setVersionDefinitionText(e.target.value)}
+                  className="w-full font-mono bg-surface-container-low border border-outline-variant rounded-md p-3 text-xs text-tertiary focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Severity
+                </label>
+                <select
+                  value={versionSeverity}
+                  onChange={(e) => setVersionSeverity(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                >
+                  {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Error Message Template (optional)
+                </label>
+                <input
+                  type="text"
+                  value={versionErrorMessage}
+                  onChange={(e) => setVersionErrorMessage(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div className="pt-4 border-t border-surface-container flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowVersionForm(false)}
+                  className="px-4 py-2.5 rounded-md border border-outline-variant text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingVersion}
+                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
+                >
+                  {isSavingVersion ? 'Publishing…' : 'Publish Version'}
                 </button>
               </div>
             </form>
