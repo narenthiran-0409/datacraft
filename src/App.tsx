@@ -216,7 +216,10 @@ function mapValidationRun(vr: ValidationRunResponse, datasetName: string): Valid
     passedRows: vr.passed_rows,
     warningRows: vr.warning_rows,
     failedRows: vr.failed_rows,
-    qualityScore: vr.quality_score,
+    // BUG FIX (Decimal-serialization sweep): quality_score is a Decimal-as-string
+    // on the wire — passed through unconverted here, unlike its siblings in the
+    // Reports effect that already got the Number() treatment.
+    qualityScore: vr.quality_score !== null ? Number(vr.quality_score) : null,
     startedAt: formatDateTime(vr.started_at),
     completedAt: vr.completed_at ? formatDateTime(vr.completed_at) : 'Not completed',
     durationMs: vr.duration_ms,
@@ -1231,7 +1234,9 @@ export default function App() {
             originalValue: issue.original_value ?? '',
             suggestedValue: suggestion?.suggested_value ?? null,
             suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
-            confidence: suggestion?.confidence ?? null,
+            // BUG FIX (Decimal-serialization sweep): confidence is a Decimal-as-
+            // string on the wire — parsed here rather than passed through.
+            confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
             status: (issue.status as Issue['status']) || 'PENDING',
             finalValue: null,
             // No row-level failure-detail / rule-join endpoint exists to know which
@@ -1711,7 +1716,9 @@ export default function App() {
           originalValue: issue.original_value ?? '',
           suggestedValue: suggestion?.suggested_value ?? null,
           suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
-          confidence: suggestion?.confidence ?? null,
+          // BUG FIX (Decimal-serialization sweep): same as above — confidence is a
+          // Decimal-as-string on the wire.
+          confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
           status: (issue.status as Issue['status']) || 'PENDING',
           finalValue: null,
           ruleTriggered: '—',

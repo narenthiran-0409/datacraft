@@ -91,8 +91,11 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
                   {dataset.name}
                 </h1>
                 <span className="bg-surface-container-high text-primary text-xs font-extrabold px-3 py-1 rounded-full border border-outline-variant">
+                  {/* BUG FIX (Decimal-serialization sweep): last_quality_score is a
+                      Decimal-as-string on the wire — Number() added, since Math.round
+                      requires an actual number argument. */}
                   {dataset.last_quality_score !== null
-                    ? `${Math.round(dataset.last_quality_score)}% Score`
+                    ? `${Math.round(Number(dataset.last_quality_score))}% Score`
                     : 'No score yet'}
                 </span>
                 {!dataset.is_active && (

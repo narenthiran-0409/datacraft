@@ -543,7 +543,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {datasets.slice(0, 8).map((d) => {
-              const score = qualityScoreByDatasetId.get(d.id) ?? d.last_quality_score;
+              // BUG FIX (Decimal-serialization sweep): last_quality_score is a
+              // Decimal-as-string on the wire (e.g. "60.00") — without Number(), the
+              // two branches here displayed inconsistently ("60%" from the parsed
+              // report data vs "60.00%" from this raw fallback) for the exact same
+              // underlying value.
+              const rawScore = qualityScoreByDatasetId.get(d.id) ?? d.last_quality_score;
+              const score = rawScore !== null && rawScore !== undefined ? Number(rawScore) : null;
               return (
                 <div
                   key={d.id}

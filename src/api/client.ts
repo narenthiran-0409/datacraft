@@ -434,7 +434,13 @@ export interface DatasetResponse {
   key_strategy: string;
   row_count_estimate: number | null;
   column_count: number | null;
-  last_quality_score: number | null;
+  // BUG FIX (Decimal-serialization sweep): Dataset.last_quality_score is a backend
+  // Numeric(5,2), serialized as a JSON string (e.g. "60.00"), not a number — was
+  // typed `number` here. No live arithmetic bug found on this field today (only
+  // template-literal display and one Math.round() call, which JS coerces
+  // correctly), but left mistyped it's a trap for the next consumer. Number()
+  // wherever this is used numerically.
+  last_quality_score: string | null;
   is_active: boolean;
   discovered_at: string;
   created_at: string;
@@ -519,9 +525,14 @@ export interface ProfileRunResponse {
   status: string;
   sample_size: number | null;
   row_count: number | null;
-  quality_score: number | null;
-  null_percentage: number | null;
-  duplicate_percentage: number | null;
+  // BUG FIX (Decimal-serialization sweep): all three are backend Numeric(5,2)
+  // columns, serialized as JSON strings — were typed `number`. No live bug found
+  // (template-literal display only; quality_score is also always null in this
+  // phase per the backend's own docstring), but mistyped nonetheless. Number()
+  // wherever used numerically.
+  quality_score: string | null;
+  null_percentage: string | null;
+  duplicate_percentage: string | null;
   error_message: string | null;
   triggered_by: string | null;
   started_at: string | null;
@@ -570,7 +581,13 @@ export interface ValidationRunResponse {
   passed_rows: number;
   warning_rows: number;
   failed_rows: number;
-  quality_score: number | null;
+  // BUG FIX (Decimal-serialization sweep): ValidationRun.quality_score is a
+  // backend Numeric(5,2), serialized as a JSON string — was typed `number`. No
+  // live bug found (template-literal display only, everywhere it's consumed
+  // today), but mapValidationRun() passed this through unconverted, unlike its
+  // siblings in the Reports effect that already got the Number() treatment —
+  // fixed there too. Number() wherever used numerically.
+  quality_score: string | null;
   error_message: string | null;
   triggered_by: string | null;
   started_at: string | null;
@@ -798,7 +815,13 @@ export interface CorrectionSuggestionResponse {
   source: string;
   ai_suggestion_id: string | null;
   suggested_value: string;
-  confidence: number;
+  // BUG FIX (Decimal-serialization sweep): CorrectionSuggestion.confidence is a
+  // backend Decimal (unconstrained precision), serialized as a JSON string — was
+  // typed `number`. No live bug found (the one arithmetic use, `confidence * 100`
+  // in ReviewCorrectionsView, happens to work because `*` forces numeric
+  // coercion, unlike `+`), but mistyped nonetheless. Number() wherever used
+  // numerically — fixed at the mapping boundary in App.tsx.
+  confidence: string;
   fix_type: string;
   reasoning: string | null;
   is_selected: boolean;

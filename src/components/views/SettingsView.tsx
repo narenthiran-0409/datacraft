@@ -231,7 +231,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {!canUpdateProfile && (
             <p className="text-[11px] text-outline flex items-center gap-1.5">
               <span className="material-symbols-outlined text-sm">lock</span>
-              Saving requires the users.manage permission
+              Contact an administrator to update your profile (requires the users.manage permission)
             </p>
           )}
           <button
