@@ -1,19 +1,30 @@
 import React, { useState } from 'react';
 import { NavScreen, QualityMetric } from '../../types';
 import { DATASET_ISSUES, RECENT_ACTIVITIES } from '../../data/mockData';
+import { ColumnResponse, DatasetResponse } from '../../api/client';
 
 interface DatasetOverviewViewProps {
   onNavigate: (screen: NavScreen) => void;
   onOpenEditSchema?: () => void;
+  dataset: DatasetResponse;
+  columns: ColumnResponse[];
 }
+
+const formatDateTime = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
 
 export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   onNavigate,
   onOpenEditSchema,
+  dataset,
+  columns,
 }) => {
   const [activeTab, setActiveTab] = useState<'overview' | 'preview' | 'rules' | 'lineage'>('overview');
   const [isRunningCheck, setIsRunningCheck] = useState(false);
   const [checkFinished, setCheckFinished] = useState(false);
+
+  const rowCount = dataset.row_count_estimate ?? 0;
+  const columnCount = dataset.column_count ?? columns.length;
 
   const metrics: QualityMetric[] = [
     {
@@ -55,20 +66,13 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
       <div className="border-b border-outline-variant pb-6">
         <div className="flex items-center gap-2 text-xs font-semibold text-outline mb-2 font-sans">
           <button
-            onClick={() => onNavigate('data-sources')}
+            onClick={() => onNavigate('data-explorer')}
             className="hover:text-primary transition-colors cursor-pointer"
           >
-            Data Sources
+            Data Explorer
           </button>
           <span>/</span>
-          <button
-            onClick={() => onNavigate('data-sources')}
-            className="hover:text-primary transition-colors cursor-pointer"
-          >
-            Corporate PostgreSQL
-          </button>
-          <span>/</span>
-          <span className="text-on-surface font-bold">Customer Data</span>
+          <span className="text-on-surface font-bold">{dataset.name}</span>
         </div>
 
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -83,20 +87,27 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
-                  Customer Data
+                <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight font-mono">
+                  {dataset.name}
                 </h1>
                 <span className="bg-surface-container-high text-primary text-xs font-extrabold px-3 py-1 rounded-full border border-outline-variant">
-                  91% Score
+                  {dataset.last_quality_score !== null
+                    ? `${Math.round(dataset.last_quality_score)}% Score`
+                    : 'No score yet'}
                 </span>
+                {!dataset.is_active && (
+                  <span className="bg-surface-container text-outline text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full">
+                    Inactive
+                  </span>
+                )}
               </div>
               <p className="text-xs text-outline mt-1 flex flex-wrap items-center gap-2 font-sans">
-                <span>12.4k records</span>
+                <span>~{rowCount.toLocaleString()} records</span>
                 <span>•</span>
-                <span>18 columns</span>
+                <span>{columnCount} columns</span>
                 <span>•</span>
                 <span className="text-primary font-semibold">
-                  Last checked: Today, 9:30 AM
+                  Last discovered: {formatDateTime(dataset.discovered_at)}
                 </span>
               </p>
             </div>
@@ -125,7 +136,7 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
               >
                 {isRunningCheck ? 'sync' : 'play_circle'}
               </span>
-              <span>{isRunningCheck ? 'Scanning 12.4k Rows...' : 'Run Data Check'}</span>
+              <span>{isRunningCheck ? `Scanning ~${rowCount.toLocaleString()} Rows...` : 'Run Data Check'}</span>
             </button>
           </div>
         </div>

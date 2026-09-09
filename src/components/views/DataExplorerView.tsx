@@ -6,6 +6,7 @@ interface DataExplorerViewProps {
   schemas: SchemaNode[];
   datasets: ExplorerDataset[];
   columns: ExplorerColumn[];
+  onOpenDataset: (datasetId: string) => void;
 }
 
 export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
@@ -13,6 +14,7 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
   schemas,
   datasets,
   columns,
+  onOpenDataset,
 }) => {
   const [expandedSchemas, setExpandedSchemas] = useState<string[]>([schemas[0]?.id].filter(Boolean));
   const [expandedDatasets, setExpandedDatasets] = useState<string[]>([]);
@@ -120,7 +122,7 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
 
                           <button
                             type="button"
-                            onClick={() => dataset.isActive && onNavigate('dataset-overview')}
+                            onClick={() => dataset.isActive && onOpenDataset(dataset.id)}
                             disabled={!dataset.isActive}
                             title={
                               dataset.isActive

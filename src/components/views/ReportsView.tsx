@@ -152,7 +152,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         <div className="bg-white rounded-lg border border-outline-variant shadow-ambient overflow-hidden">
           <div className="p-6 border-b border-surface-container">
             <h3 className="font-editorial text-xl font-bold text-on-surface">Rule Effectiveness</h3>
-            <p className="text-xs text-on-surface-variant mt-1">Ranked by failure count, with the reviewer reject rate for each rule's suggested corrections</p>
+            <p className="text-xs text-on-surface-variant mt-1">Ranked by failure count, with the share of evaluated rows that failed each rule</p>
           </div>
           <div className="divide-y divide-surface-container">
             {sortedRules.map((rule) => (
@@ -177,7 +177,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 </div>
                 <div className="text-right shrink-0 w-24">
                   <p className="font-editorial text-lg font-bold text-secondary">{rule.rejectRate}%</p>
-                  <p className="text-[10px] text-outline uppercase tracking-wider font-semibold">Reject Rate</p>
+                  <p className="text-[10px] text-outline uppercase tracking-wider font-semibold">Failure Rate</p>
                 </div>
               </div>
             ))}
@@ -197,7 +197,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               <div key={d.datasetName} className="p-5 flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-on-surface">{d.datasetName}</p>
-                  <p className="text-xs text-outline mt-0.5">{d.dataSourceName}</p>
+                  {d.dataSourceName && <p className="text-xs text-outline mt-0.5">{d.dataSourceName}</p>}
                 </div>
                 <div className="text-right">
                   <p className={`font-editorial text-xl font-extrabold ${d.latestQualityScore !== null ? 'text-primary' : 'text-outline'}`}>
