@@ -623,6 +623,52 @@ export function getValidationRun(validationRunId: string): Promise<ValidationRun
   return apiRequest(`/validation-runs/${validationRunId}`);
 }
 
+// GET /validation-runs/{id}/failures — server-side JOIN, so rule_name/rule_type/
+// assignment_scope are always real names (never bare IDs); column_id/column_name
+// are genuinely nullable for row-level/multi-column rules with no single column
+// (app/modules/validation/service.py's list_failures, confirmed via outerjoin on
+// Column — not a resolution gap).
+export interface ValidationFailureResponse {
+  id: string;
+  validation_run_id: string;
+  record_ref: string;
+  row_index: number;
+  rule_assignment_id: string;
+  rule_id: string;
+  rule_name: string;
+  rule_type: string;
+  assignment_scope: string;
+  column_id: string | null;
+  column_name: string | null;
+  severity: string;
+  failed_value: string | null;
+  expected_value: string | null;
+  reason: string | null;
+  created_at: string;
+}
+
+export interface ValidationFailureListResponse {
+  items: ValidationFailureResponse[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ListValidationFailuresQuery {
+  severity?: string;
+  column_id?: string;
+  rule_assignment_id?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export function listValidationFailures(
+  validationRunId: string,
+  query: ListValidationFailuresQuery = {}
+): Promise<ValidationFailureListResponse> {
+  return apiRequest(`/validation-runs/${validationRunId}/failures${buildQuery(query)}`);
+}
+
 // --- Jobs ------------------------------------------------------------------
 
 export interface JobResponse {

@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavScreen, ValidationRun } from '../../types';
+import { ValidationFailureResponse } from '../../api/client';
 
 interface ValidationRunDetailsViewProps {
   onNavigate: (screen: NavScreen) => void;
@@ -11,6 +12,15 @@ interface ValidationRunDetailsViewProps {
   isStartingReview: boolean;
   onStartReview: () => void;
   actionError: string | null;
+  failures: ValidationFailureResponse[];
+  failuresTotal: number;
+  failuresPage: number;
+  failuresPageSize: number;
+  onFailuresPageChange: (page: number) => void;
+  failuresSeverity: string;
+  onFailuresSeverityChange: (severity: string) => void;
+  failuresLoading: boolean;
+  failuresError: string | null;
 }
 
 const STATUS_STYLES: Record<ValidationRun['status'], string> = {
@@ -21,6 +31,15 @@ const STATUS_STYLES: Record<ValidationRun['status'], string> = {
   FAILED: 'bg-error-container text-on-error-container',
   CANCELLED: 'bg-surface-container text-outline',
 };
+
+const SEVERITY_STYLES: Record<string, string> = {
+  CRITICAL: 'bg-error-container text-on-error-container',
+  HIGH: 'bg-error-container text-on-error-container',
+  MEDIUM: 'bg-secondary-fixed text-on-secondary-fixed',
+  LOW: 'bg-surface-container text-on-surface-variant',
+};
+
+const SEVERITY_OPTIONS = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 
 const formatDuration = (ms: number | null) => {
   if (ms === null) return '—';
@@ -41,6 +60,15 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
   isStartingReview,
   onStartReview,
   actionError,
+  failures,
+  failuresTotal,
+  failuresPage,
+  failuresPageSize,
+  onFailuresPageChange,
+  failuresSeverity,
+  onFailuresSeverityChange,
+  failuresLoading,
+  failuresError,
 }) => {
   if (!run) {
     return (
@@ -64,6 +92,7 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
   const passedPct = total ? (run.passedRows / total) * 100 : 0;
   const warningPct = total ? (run.warningRows / total) * 100 : 0;
   const failedPct = total ? (run.failedRows / total) * 100 : 0;
+  const totalPages = Math.max(1, Math.ceil(failuresTotal / failuresPageSize));
 
   return (
     <div className="p-6 md:p-10 max-w-5xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -202,17 +231,120 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
         )}
       </div>
 
-      {/* Failure Detail — explicit, honest empty state */}
-      <div className="bg-surface-container-low rounded-lg border border-outline-variant p-6 flex items-start gap-3">
-        <span className="material-symbols-outlined text-outline text-xl mt-0.5">construction</span>
-        <div>
-          <p className="text-sm font-bold text-on-surface">Row-level failure detail isn't available yet</p>
-          <p className="text-xs text-on-surface-variant mt-1 max-w-2xl leading-relaxed">
-            This screen shows run-level outcomes only. Browsing the individual rows and columns
-            that produced warnings or failures for this run is not yet supported here — that
-            capability doesn't exist in the backend today, so it isn't shown as if it did.
-          </p>
+      {/* Failure Detail — real, paginated, via GET /validation-runs/{id}/failures */}
+      <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-editorial font-bold text-lg text-on-surface">Row-Level Failure Detail</h3>
+            <p className="text-xs text-outline mt-0.5">
+              {failuresTotal.toLocaleString()} matching row{failuresTotal === 1 ? '' : 's'}
+              {run.warningRows + run.failedRows > 0 ? ` out of ${(run.warningRows + run.failedRows).toLocaleString()} warning/failed` : ''}
+            </p>
+          </div>
+
+          {/* column_id/rule_assignment_id filters are also supported by the
+              backend/client function but not exposed here — populating those
+              dropdowns with real names would require a second lookup call, and
+              severity alone (a small, fixed set of values) already covers the
+              common triage case; left as a deliberate scope choice. */}
+          <select
+            value={failuresSeverity}
+            onChange={(e) => onFailuresSeverityChange(e.target.value)}
+            className="bg-surface-container-low border border-outline-variant rounded-md px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary"
+          >
+            <option value="">All severities</option>
+            {SEVERITY_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
         </div>
+
+        {failuresError ? (
+          <p className="text-xs text-error flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-sm">error</span>
+            {failuresError}
+          </p>
+        ) : failuresLoading ? (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-10 bg-surface-container-low rounded-md animate-pulse" />
+            ))}
+          </div>
+        ) : failures.length === 0 ? (
+          <p className="text-xs text-outline italic">
+            {failuresSeverity
+              ? `No ${failuresSeverity.toLowerCase()}-severity failures found.`
+              : 'No row-level failures recorded for this run.'}
+          </p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wider text-outline border-b border-outline-variant">
+                    <th className="pb-2 pr-3">Record</th>
+                    <th className="pb-2 pr-3">Column</th>
+                    <th className="pb-2 pr-3">Rule</th>
+                    <th className="pb-2 pr-3">Severity</th>
+                    <th className="pb-2 pr-3">Failed Value</th>
+                    <th className="pb-2 pr-3">Expected</th>
+                    <th className="pb-2">Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-container">
+                  {failures.map((f) => (
+                    <tr key={f.id}>
+                      <td className="py-2 pr-3 font-mono text-on-surface-variant">{f.record_ref}</td>
+                      <td className="py-2 pr-3 font-mono text-on-surface-variant">{f.column_name ?? '—'}</td>
+                      <td className="py-2 pr-3">
+                        <span className="font-semibold text-on-surface">{f.rule_name}</span>
+                        <span className="block text-[10px] text-outline">{f.rule_type}</span>
+                      </td>
+                      <td className="py-2 pr-3">
+                        <span
+                          className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                            SEVERITY_STYLES[f.severity] ?? 'bg-surface-container text-on-surface-variant'
+                          }`}
+                        >
+                          {f.severity}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 font-mono text-error">{f.failed_value ?? '(empty)'}</td>
+                      <td className="py-2 pr-3 font-mono text-on-surface-variant">{f.expected_value ?? '—'}</td>
+                      <td className="py-2 text-on-surface-variant">{f.reason ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-surface-container">
+              <span className="text-[11px] text-outline">
+                Page {failuresPage} of {totalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={failuresPage <= 1}
+                  onClick={() => onFailuresPageChange(failuresPage - 1)}
+                  className="px-3 py-1.5 rounded border border-outline-variant bg-white hover:bg-surface-container-low disabled:opacity-50 disabled:cursor-not-allowed text-on-surface font-medium cursor-pointer text-xs"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={failuresPage >= totalPages}
+                  onClick={() => onFailuresPageChange(failuresPage + 1)}
+                  className="px-3 py-1.5 rounded border border-outline-variant bg-white hover:bg-surface-container-low disabled:opacity-50 disabled:cursor-not-allowed text-on-surface font-medium cursor-pointer text-xs"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

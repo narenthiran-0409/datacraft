@@ -75,6 +75,9 @@ import {
   createValidationRun,
   getValidationRun,
   ValidationRunResponse,
+  listValidationFailures,
+  ValidationFailureResponse,
+  ValidationFailureListResponse,
   // Jobs
   cancelJob as apiCancelJob,
   // Review
@@ -270,6 +273,38 @@ function mapApprovalRequest(
   };
 }
 
+// Fetches every page of a validation run's real, JOIN-resolved failures (GET
+// /validation-runs/{id}/failures) — used to resolve real column/rule names for
+// Review & Corrections issues (see the review-corrections effect and
+// handleGenerateSuggestions), each of which traces back to exactly one failure via
+// Issue.validation_failure_id (a real, NOT NULL FK — confirmed in
+// app/db/models/review.py). Swallows its own errors (e.g. missing metadata.read)
+// by returning whatever was fetched so far — callers treat "not found in the map"
+// as the honest fallback, not a hard failure.
+async function fetchAllValidationFailures(
+  runId: string,
+  fetchPage: (runId: string, page: number, pageSize: number) => Promise<ValidationFailureListResponse>
+): Promise<ValidationFailureResponse[]> {
+  const pageSize = 200;
+  let page = 1;
+  let seen = 0;
+  let total = Infinity;
+  const all: ValidationFailureResponse[] = [];
+  try {
+    while (seen < total) {
+      const resp = await fetchPage(runId, page, pageSize);
+      all.push(...resp.items);
+      seen += resp.items.length;
+      total = resp.total;
+      if (resp.items.length === 0) break;
+      page += 1;
+    }
+  } catch {
+    // Return whatever was fetched so far — see doc comment above.
+  }
+  return all;
+}
+
 function mapUserResponseToUser(u: UserResponse, roleById: Map<string, RoleResponse>): User {
   const roleNames = u.role_ids
     .map((id) => roleById.get(id)?.name)
@@ -447,6 +482,16 @@ export default function App() {
   const [validationDetailActionError, setValidationDetailActionError] = useState<string | null>(null);
   const [isCancellingValidationJob, setIsCancellingValidationJob] = useState(false);
   const [isStartingReview, setIsStartingReview] = useState(false);
+
+  // Validation Run Details — row-level failure detail (real, paginated; GET
+  // /validation-runs/{id}/failures did not exist before this task).
+  const [validationFailures, setValidationFailures] = useState<ValidationFailureResponse[]>([]);
+  const [validationFailuresTotal, setValidationFailuresTotal] = useState(0);
+  const [validationFailuresPage, setValidationFailuresPage] = useState(1);
+  const [validationFailuresSeverity, setValidationFailuresSeverity] = useState<string>('');
+  const [validationFailuresLoading, setValidationFailuresLoading] = useState(false);
+  const [validationFailuresError, setValidationFailuresError] = useState<string | null>(null);
+  const VALIDATION_FAILURES_PAGE_SIZE = 25;
 
   // Review & Corrections
   const [reviewRuns, setReviewRuns] = useState<ReviewRun[]>([]);
@@ -1182,10 +1227,64 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScreen, selectedValidationRunId]);
 
+  // Validation Run Details' row-level failure detail — real, paginated, same
+  // metadata.read gate as the run-details fetch above (this endpoint has no
+  // separate permission of its own). Resets to page 1 whenever the run or the
+  // severity filter changes.
+  useEffect(() => {
+    if (currentScreen !== 'validation-run-details') return;
+    if (!selectedValidationRunId) return;
+    if (!hasPermission('metadata.read')) return;
+
+    let cancelled = false;
+    setValidationFailuresLoading(true);
+    setValidationFailuresError(null);
+
+    listValidationFailures(selectedValidationRunId, {
+      page: validationFailuresPage,
+      page_size: VALIDATION_FAILURES_PAGE_SIZE,
+      severity: validationFailuresSeverity || undefined,
+    })
+      .then((resp) => {
+        if (cancelled) return;
+        setValidationFailures(resp.items);
+        setValidationFailuresTotal(resp.total);
+      })
+      .catch((err) => {
+        if (!cancelled) setValidationFailuresError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setValidationFailuresLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedValidationRunId, validationFailuresPage, validationFailuresSeverity]);
+
+  // Reset failure-detail pagination/filter whenever a different run is opened.
+  useEffect(() => {
+    setValidationFailuresPage(1);
+    setValidationFailuresSeverity('');
+  }, [selectedValidationRunId]);
+
   // Review & Corrections: list reviews, then (N+1, dev-scale only — no bulk endpoint
   // exists for any of this) each review's validation run (for its dataset name),
   // issues, and suggestions, merged into one flat Issue[] exactly like the mock data
   // shape did, so the view's own per-run progress computation needs no changes.
+  //
+  // Column/rule names: every Issue.validation_failure_id is a real, NOT NULL FK
+  // (app/db/models/review.py — confirmed the only Issue(...) construction site is
+  // review/service.py's bulk-create from validation failures, so there is no other
+  // way an Issue can exist). That means EVERY issue on this screen can, in
+  // principle, be traced back to the failure that produced it. Resolved here by
+  // fetching each represented review's validation run's failures ONCE (not per
+  // issue — batched by unique validation_run_id) via the new GET /validation-runs/
+  // {id}/failures, then matching on validation_failure_id. Gated separately on
+  // metadata.read (that endpoint's actual permission, distinct from this screen's
+  // own review.read) — a review.read-only user without metadata.read still sees
+  // every issue, just with the old truncated-id fallback instead of real names.
   useEffect(() => {
     if (currentScreen !== 'review-corrections') return;
     if (!hasPermission('review.read')) return;
@@ -1193,6 +1292,7 @@ export default function App() {
     let cancelled = false;
     setReviewRunsLoading(true);
     setReviewRunsError(null);
+    const canResolveNames = hasPermission('metadata.read');
 
     (async () => {
       const [reviewsList, datasetsResp] = await Promise.all([listReviews(), listDatasets({ page_size: 200 })]);
@@ -1212,6 +1312,21 @@ export default function App() {
 
       if (cancelled) return;
 
+      // One failures fetch per UNIQUE validation_run_id represented, not per issue
+      // or per review (several reviews could in principle share a run).
+      const failureById = new Map<string, ValidationFailureResponse>();
+      if (canResolveNames) {
+        const uniqueRunIds = Array.from(new Set(details.map((d) => d.rr.validation_run_id)));
+        await Promise.all(
+          uniqueRunIds.map(async (runId) => {
+            const items = await fetchAllValidationFailures(runId, (id, page, page_size) =>
+              listValidationFailures(id, { page, page_size })
+            );
+            items.forEach((f) => failureById.set(f.id, f));
+          })
+        );
+      }
+
       const mappedRuns: ReviewRun[] = [];
       const mappedIssues: Issue[] = [];
       details.forEach(({ rr, datasetName, issuesList, suggestionsList }) => {
@@ -1223,13 +1338,16 @@ export default function App() {
         const mapped: Issue[] = issuesList.map((issue) => {
           const candidates = suggestionsByIssueId.get(issue.id) ?? [];
           const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
+          const failure = failureById.get(issue.validation_failure_id);
           return {
             id: issue.id,
             reviewRunId: issue.review_run_id,
             recordRef: issue.record_ref,
-            // No name-resolution endpoint for column_id from this domain — shown as a
-            // truncated id rather than fabricating a name.
-            columnName: issue.column_id ? issue.column_id.slice(0, 8) : '—',
+            // Real name when resolvable (metadata.read + the failure was found in
+            // its run's list); truncated id as an honest fallback otherwise — e.g.
+            // no metadata.read, or a row-level rule with no single column
+            // (column_name is genuinely null for those, not unresolved).
+            columnName: failure ? failure.column_name ?? '(row-level)' : issue.column_id ? issue.column_id.slice(0, 8) : '—',
             severity: (issue.severity as Issue['severity']) || 'MEDIUM',
             originalValue: issue.original_value ?? '',
             suggestedValue: suggestion?.suggested_value ?? null,
@@ -1239,9 +1357,7 @@ export default function App() {
             confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
             status: (issue.status as Issue['status']) || 'PENDING',
             finalValue: null,
-            // No row-level failure-detail / rule-join endpoint exists to know which
-            // rule triggered a given issue — shown as unavailable rather than guessed.
-            ruleTriggered: '—',
+            ruleTriggered: failure ? failure.rule_name : '—',
             suggestionId: suggestion?.id ?? null,
           };
         });
@@ -1696,22 +1812,35 @@ export default function App() {
     setReviewActionError(null);
     try {
       const result = await apiGenerateReviewSuggestions(reviewRunId);
-      const [issuesList, suggestionsList] = await Promise.all([
+      const [issuesList, suggestionsList, reviewDetail] = await Promise.all([
         listReviewIssues(reviewRunId),
         listReviewSuggestions(reviewRunId),
+        getReview(reviewRunId).catch(() => null),
       ]);
       const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
       suggestionsList.forEach((s) => {
         suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
       });
+      // Same real column/rule name resolution as the initial load (see the
+      // review-corrections effect's comment) — without this, re-fetching after
+      // generating suggestions would regress this review's issues back to
+      // truncated ids.
+      const failureById = new Map<string, ValidationFailureResponse>();
+      if (reviewDetail && hasPermission('metadata.read')) {
+        const items = await fetchAllValidationFailures(reviewDetail.validation_run_id, (id, page, page_size) =>
+          listValidationFailures(id, { page, page_size })
+        );
+        items.forEach((f) => failureById.set(f.id, f));
+      }
       const refreshed: Issue[] = issuesList.map((issue) => {
         const candidates = suggestionsByIssueId.get(issue.id) ?? [];
         const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
+        const failure = failureById.get(issue.validation_failure_id);
         return {
           id: issue.id,
           reviewRunId: issue.review_run_id,
           recordRef: issue.record_ref,
-          columnName: issue.column_id ? issue.column_id.slice(0, 8) : '—',
+          columnName: failure ? failure.column_name ?? '(row-level)' : issue.column_id ? issue.column_id.slice(0, 8) : '—',
           severity: (issue.severity as Issue['severity']) || 'MEDIUM',
           originalValue: issue.original_value ?? '',
           suggestedValue: suggestion?.suggested_value ?? null,
@@ -1721,7 +1850,7 @@ export default function App() {
           confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
           status: (issue.status as Issue['status']) || 'PENDING',
           finalValue: null,
-          ruleTriggered: '—',
+          ruleTriggered: failure ? failure.rule_name : '—',
           suggestionId: suggestion?.id ?? null,
         };
       });
@@ -2282,6 +2411,15 @@ export default function App() {
                 isStartingReview={isStartingReview}
                 onStartReview={handleStartReview}
                 actionError={validationDetailActionError}
+                failures={validationFailures}
+                failuresTotal={validationFailuresTotal}
+                failuresPage={validationFailuresPage}
+                failuresPageSize={VALIDATION_FAILURES_PAGE_SIZE}
+                onFailuresPageChange={setValidationFailuresPage}
+                failuresSeverity={validationFailuresSeverity}
+                onFailuresSeverityChange={setValidationFailuresSeverity}
+                failuresLoading={validationFailuresLoading}
+                failuresError={validationFailuresError}
               />
             )}
 
