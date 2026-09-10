@@ -85,6 +85,9 @@ export const INITIAL_DATA_SOURCES: DataSource[] = [
     icon: 'database',
     host: 'db.prod.datacraft.internal:5432',
     recordsSynced: '4.8M records',
+    isActive: true,
+    ownerTeam: null,
+    businessDomain: null,
   },
   {
     id: 'src-2',
@@ -98,6 +101,9 @@ export const INITIAL_DATA_SOURCES: DataSource[] = [
     icon: 'cloud',
     host: 'api.shopify.com/v2/orders',
     recordsSynced: '840k records',
+    isActive: true,
+    ownerTeam: null,
+    businessDomain: null,
   },
   {
     id: 'src-3',
@@ -111,6 +117,9 @@ export const INITIAL_DATA_SOURCES: DataSource[] = [
     icon: 'description',
     host: 's3://datacraft-marketing-lake/csv/',
     recordsSynced: '1.2M records (Partial)',
+    isActive: true,
+    ownerTeam: null,
+    businessDomain: null,
   },
   {
     id: 'src-4',
@@ -124,6 +133,9 @@ export const INITIAL_DATA_SOURCES: DataSource[] = [
     icon: 'ac_unit',
     host: 'datacraft.snowflakecomputing.com',
     recordsSynced: '18.5M records',
+    isActive: true,
+    ownerTeam: null,
+    businessDomain: null,
   },
   {
     id: 'src-5',
@@ -137,6 +149,9 @@ export const INITIAL_DATA_SOURCES: DataSource[] = [
     icon: 'hub',
     host: 'datacraft.my.salesforce.com',
     recordsSynced: '320k records',
+    isActive: true,
+    ownerTeam: null,
+    businessDomain: null,
   },
 ];
 

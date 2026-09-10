@@ -55,7 +55,9 @@ export interface DataSource {
   name: string;
   type: 'database' | 'api' | 'file';
   typeLabel: string;
-  status: 'connected' | 'failed' | 'syncing';
+  // 'inactive' added for real backend wiring (this task) — is_active=false, distinct
+  // from 'failed' (a sync problem), which this screen has no real signal for yet.
+  status: 'connected' | 'failed' | 'syncing' | 'inactive';
   description: string;
   datasetsCount: number;
   lastSync: string;
@@ -64,6 +66,11 @@ export interface DataSource {
   iconTextColor?: string;
   host?: string;
   recordsSynced?: string;
+  // Additive (this task): the only fields the backend's PUT /data-sources/{id} actually
+  // accepts (name is not editable), plus the real is_active flag for edit/delete gating.
+  isActive: boolean;
+  ownerTeam: string | null;
+  businessDomain: string | null;
 }
 
 export interface QualityMetric {

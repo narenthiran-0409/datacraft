@@ -28,6 +28,9 @@ import {
   onSessionExpired,
   ApiError,
   listDataSources,
+  updateDataSource as apiUpdateDataSource,
+  deleteDataSource as apiDeleteDataSource,
+  DataSourceUpdateRequest,
   listConnections,
   listConnectionTypes,
   ConnectionResponse,
@@ -403,6 +406,8 @@ export default function App() {
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [dataSourcesLoading, setDataSourcesLoading] = useState(false);
   const [dataSourcesError, setDataSourcesError] = useState<string | null>(null);
+  const [dataSourceActionPendingId, setDataSourceActionPendingId] = useState<string | null>(null);
+  const [dataSourceActionError, setDataSourceActionError] = useState<string | null>(null);
 
   // Data Explorer — separate from the mock schemas/explorerDatasets/explorerColumns
   // above (those stay mock for Validation Workspace's sake).
@@ -655,13 +660,19 @@ export default function App() {
               (canReadConnections ? 'No connection configured' : 'Connections not visible to you'),
             // is_active is the only real status signal available from this screen's
             // scoped endpoints — connection.status values aren't documented/confirmed,
-            // so this doesn't try to distinguish "syncing" from "connected".
-            status: s.is_active ? 'connected' : 'failed',
+            // so this doesn't try to distinguish "syncing" from "connected". BUG FIX
+            // (this task): was `s.is_active ? 'connected' : 'failed'`, which showed a
+            // deactivated source as "Sync Failed" — misleading, since deactivation is
+            // deliberate, not a technical failure.
+            status: s.is_active ? 'connected' : 'inactive',
             description: s.description || s.business_domain || 'No description provided.',
             datasetsCount: 0, // no per-source dataset count endpoint in this screen's scope
             lastSync: formatDateTime(s.updated_at ?? s.created_at),
             icon: type === 'database' ? 'database' : type === 'api' ? 'cloud' : 'description',
             host: primary ? `${primary.host}:${primary.port}` : undefined,
+            isActive: s.is_active,
+            ownerTeam: s.owner_team,
+            businessDomain: s.business_domain,
           };
         });
         setDataSources(mapped);
@@ -1670,11 +1681,67 @@ export default function App() {
       icon: input.type === 'database' ? 'database' : input.type === 'api' ? 'cloud' : 'description',
       host: input.host || 'connected.datacraft.internal',
       recordsSynced: '0 records (indexing)',
+      isActive: true,
+      ownerTeam: null,
+      businessDomain: null,
     };
 
     setDataSources((prev) => [newSource, ...prev]);
     setCurrentScreen('data-sources');
     triggerToast(`Data source "${newSource.name}" successfully registered`);
+  };
+
+  // PUT /data-sources/{id} only accepts description/owner_team/business_domain —
+  // name is not editable (confirmed via DataSourceUpdateRequest in schemas.py). No
+  // optimistic update: dataSources is only touched after the real response succeeds.
+  const handleUpdateDataSource = async (id: string, input: DataSourceUpdateRequest): Promise<boolean> => {
+    setDataSourceActionPendingId(id);
+    setDataSourceActionError(null);
+    try {
+      const updated = await apiUpdateDataSource(id, input);
+      setDataSources((prev) =>
+        prev.map((s) =>
+          s.id === id
+            ? {
+                ...s,
+                description: updated.description || updated.business_domain || 'No description provided.',
+                ownerTeam: updated.owner_team,
+                businessDomain: updated.business_domain,
+              }
+            : s
+        )
+      );
+      triggerToast(`"${updated.name}" updated`);
+      return true;
+    } catch (err) {
+      setDataSourceActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setDataSourceActionPendingId(null);
+    }
+  };
+
+  // DELETE /data-sources/{id} is a soft deactivate (confirmed via
+  // deactivate_data_source in service.py — is_active set to false, row kept). Blocked
+  // with a 409 DATA_SOURCE_HAS_ACTIVE_CONNECTIONS if the source still has active
+  // connections; that specific backend message (which already states the count) is
+  // surfaced as-is rather than replaced with a generic failure.
+  const handleDeleteDataSource = async (id: string): Promise<boolean> => {
+    setDataSourceActionPendingId(id);
+    setDataSourceActionError(null);
+    try {
+      const deactivated = await apiDeleteDataSource(id);
+      setDataSources((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, isActive: false, status: 'inactive' } : s))
+      );
+      triggerToast(`"${deactivated.name}" removed from active data sources`);
+      return true;
+    } catch (err) {
+      setDataSourceActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setDataSourceActionPendingId(null);
+    }
   };
 
   // Real POST /ai/chat — no more fake keyword matching or setTimeout. Sends
@@ -2485,6 +2552,11 @@ export default function App() {
                 onNavigate={handleNavigate}
                 onOpenAddSource={() => handleNavigate('add-data-source')}
                 onSyncSource={handleSyncSource}
+                canManage={hasPermission('data_sources.manage')}
+                actionPendingId={dataSourceActionPendingId}
+                actionError={dataSourceActionError}
+                onUpdateSource={handleUpdateDataSource}
+                onDeleteSource={handleDeleteDataSource}
               />
             )}
 
