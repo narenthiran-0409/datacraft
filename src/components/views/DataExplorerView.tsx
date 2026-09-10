@@ -63,9 +63,24 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
       {/* Schema Tree */}
       <div className="space-y-4">
         {schemas.map((schema) => {
-          const schemaDatasets = datasets.filter(
-            (d) => d.schemaId === schema.id && (showInactiveConnections || !d.connectionInactive)
+          // Computed from the dataset list itself (grouped by schemaId) rather than
+          // assumed from the schema's own connection — a schema with SOME but not
+          // ALL of its datasets on an inactive connection must still show, with only
+          // the affected rows flagged; only an ALL-inactive schema hides entirely.
+          const allSchemaDatasets = datasets.filter((d) => d.schemaId === schema.id);
+          const hasInactiveConnectionDataset = allSchemaDatasets.some((d) => d.connectionInactive);
+          const schemaDatasets = allSchemaDatasets.filter(
+            (d) => showInactiveConnections || !d.connectionInactive
           );
+
+          // Toggle-off hides a schema entirely only when it actually had datasets
+          // and every one of them got filtered out (all tied to inactive
+          // connections) — an already-empty schema (0 datasets discovered) is left
+          // alone, that's a pre-existing, unrelated state.
+          if (!showInactiveConnections && allSchemaDatasets.length > 0 && schemaDatasets.length === 0) {
+            return null;
+          }
+
           const isSchemaOpen = expandedSchemas.includes(schema.id);
 
           return (
@@ -91,9 +106,19 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
                     <span className="material-symbols-outlined text-lg">folder_open</span>
                   </span>
                   <div>
-                    <h3 className="font-editorial font-bold text-base text-on-surface">
-                      {schema.name}
-                    </h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-editorial font-bold text-base text-on-surface">
+                        {schema.name}
+                      </h3>
+                      {hasInactiveConnectionDataset && (
+                        <span
+                          className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed shrink-0"
+                          title="At least one dataset in this schema has an inactive connection. Informational only — every action below still works normally."
+                        >
+                          Connection Inactive
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[11px] text-outline">
                       {schema.datasetCount} dataset{schema.datasetCount === 1 ? '' : 's'} discovered
                     </p>

@@ -282,6 +282,12 @@ export interface DataSourceResponse {
   owner_team: string | null;
   business_domain: string | null;
   is_active: boolean;
+  // Additive (backend commit 74f28e7) — set on deactivate, cleared on reactivate.
+  // Not read client-side: the 30-day auto-hide it powers is enforced entirely
+  // server-side (list_data_sources excludes anything deactivated >30 days ago
+  // unconditionally, even when is_active is explicitly requested), so nothing
+  // here needs to replicate that date math.
+  deactivated_at: string | null;
   created_at: string;
   updated_at: string | null;
 }
@@ -350,6 +356,9 @@ export interface ConnectionResponse {
   last_tested_at: string | null;
   last_test_latency_ms: number | null;
   is_active: boolean;
+  // Additive (backend commit 74f28e7) — same semantics as DataSourceResponse's
+  // deactivated_at above; not read client-side for the same reason.
+  deactivated_at: string | null;
   created_at: string;
   updated_at: string | null;
 }
