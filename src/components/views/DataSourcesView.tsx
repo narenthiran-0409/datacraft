@@ -18,6 +18,8 @@ interface DataSourcesViewProps {
   connectionActionPendingId: string | null;
   connectionActionError: string | null;
   onDeactivateConnection: (id: string) => Promise<boolean>;
+  onReactivateSource: (id: string) => Promise<boolean>;
+  onReactivateConnection: (id: string) => Promise<boolean>;
 }
 
 export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
@@ -36,6 +38,8 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   connectionActionPendingId,
   connectionActionError,
   onDeactivateConnection,
+  onReactivateSource,
+  onReactivateConnection,
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'database' | 'api' | 'file'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -337,7 +341,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                       >
                         <span className="material-symbols-outlined text-lg">edit</span>
                       </button>
-                      {source.isActive && (
+                      {source.isActive ? (
                         <button
                           type="button"
                           onClick={(e) => {
@@ -349,6 +353,21 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                           className="p-1.5 rounded text-on-surface-variant hover:text-error hover:bg-error-container transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <span className="material-symbols-outlined text-lg">delete</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onReactivateSource(source.id);
+                          }}
+                          disabled={isActionPending}
+                          title="Reactivate data source"
+                          className="p-1.5 rounded text-on-surface-variant hover:text-primary hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <span className="material-symbols-outlined text-lg">
+                            {isActionPending ? 'sync' : 'restart_alt'}
+                          </span>
                         </button>
                       )}
                     </div>
@@ -615,17 +634,30 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                               : 'Never tested'}
                           </p>
                         </div>
-                        {canManageConnections && c.is_active && (
-                          <button
-                            type="button"
-                            onClick={() => setDeactivatingConnection(c)}
-                            disabled={isPending}
-                            title="Deactivate connection"
-                            className="p-1.5 rounded text-on-surface-variant hover:text-error hover:bg-error-container transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-                          >
-                            <span className="material-symbols-outlined text-lg">link_off</span>
-                          </button>
-                        )}
+                        {canManageConnections &&
+                          (c.is_active ? (
+                            <button
+                              type="button"
+                              onClick={() => setDeactivatingConnection(c)}
+                              disabled={isPending}
+                              title="Deactivate connection"
+                              className="p-1.5 rounded text-on-surface-variant hover:text-error hover:bg-error-container transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                            >
+                              <span className="material-symbols-outlined text-lg">link_off</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => onReactivateConnection(c.id)}
+                              disabled={isPending}
+                              title="Reactivate connection"
+                              className="p-1.5 rounded text-on-surface-variant hover:text-primary hover:bg-surface-container-low transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                            >
+                              <span className="material-symbols-outlined text-lg">
+                                {isPending ? 'sync' : 'restart_alt'}
+                              </span>
+                            </button>
+                          ))}
                       </div>
                     );
                   })

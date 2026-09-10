@@ -8,6 +8,9 @@ interface DatasetOverviewViewProps {
   onOpenEditSchema?: () => void;
   dataset: DatasetResponse;
   columns: ColumnResponse[];
+  // Additive (this task): derived client-side from schema.connection_id ->
+  // connection.is_active. Visual only — never blocks any action on this screen.
+  connectionInactive?: boolean;
 }
 
 const formatDateTime = (iso: string | null) =>
@@ -18,6 +21,7 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   onOpenEditSchema,
   dataset,
   columns,
+  connectionInactive = false,
 }) => {
   const [activeTab, setActiveTab] = useState<'overview' | 'preview' | 'rules' | 'lineage'>('overview');
   const [isRunningCheck, setIsRunningCheck] = useState(false);
@@ -101,6 +105,14 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
                 {!dataset.is_active && (
                   <span className="bg-surface-container text-outline text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full">
                     Inactive
+                  </span>
+                )}
+                {connectionInactive && (
+                  <span
+                    className="bg-secondary-fixed text-on-secondary-fixed text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full"
+                    title="This dataset's underlying connection has been deactivated. Informational only — every action on this page still works normally."
+                  >
+                    Connection Inactive
                   </span>
                 )}
               </div>

@@ -4,10 +4,18 @@ import { INITIAL_DATA_ROWS } from '../../data/mockData';
 
 interface DatasetPreviewViewProps {
   onNavigate: (screen: NavScreen) => void;
+  // Additive (this task): the row data below is still mock (this screen has never
+  // been wired to the real GET /datasets/{id}/preview endpoint — see the
+  // accompanying report), but the dataset name and connection status are real,
+  // derived the same way as Data Explorer/Dataset Overview.
+  datasetName?: string;
+  connectionInactive?: boolean;
 }
 
 export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
   onNavigate,
+  datasetName,
+  connectionInactive = false,
 }) => {
   const [rows, setRows] = useState<DataRow[]>(INITIAL_DATA_ROWS);
   const [searchTerm, setSearchTerm] = useState('');
@@ -68,16 +76,27 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
               onClick={() => onNavigate('dataset-overview')}
               className="hover:text-primary transition-colors cursor-pointer"
             >
-              Customer Data
+              {datasetName ?? 'Dataset'}
             </button>
             <span>/</span>
             <span className="text-on-surface font-bold">Table Preview</span>
           </div>
-          <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
-            Customer Records Preview
-          </h1>
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
+              {datasetName ?? 'Dataset'} Preview
+            </h1>
+            {connectionInactive && (
+              <span
+                className="bg-secondary-fixed text-on-secondary-fixed text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full"
+                title="This dataset's underlying connection has been deactivated. Informational only — preview still works normally."
+              >
+                Connection Inactive
+              </span>
+            )}
+          </div>
           <p className="text-xs text-outline mt-1 font-sans">
-            Displaying sample partition from <code className="font-mono bg-surface-container px-1.5 py-0.5 rounded text-on-surface">users_master</code> (12,418 total rows)
+            Sample rows shown below are illustrative placeholder data, not a live read from{' '}
+            {datasetName ?? 'this dataset'}.
           </p>
         </div>
 

@@ -320,6 +320,11 @@ export function deleteDataSource(dataSourceId: string): Promise<DataSourceRespon
   return apiRequest(`/data-sources/${dataSourceId}`, { method: 'DELETE' });
 }
 
+/** No guard on this side (confirmed via reactivate_data_source in service.py) — always succeeds given permission. */
+export function reactivateDataSource(dataSourceId: string): Promise<DataSourceResponse> {
+  return apiRequest(`/data-sources/${dataSourceId}/reactivate`, { method: 'POST' });
+}
+
 // --- Connections -------------------------------------------------------------
 
 export interface ConnectionTypeResponse {
@@ -403,6 +408,17 @@ export function updateConnection(connectionId: string, input: ConnectionUpdateRe
 /** Deactivates the connection (soft delete) — returns the updated resource, not 204. */
 export function deleteConnection(connectionId: string): Promise<ConnectionResponse> {
   return apiRequest(`/connections/${connectionId}`, { method: 'DELETE' });
+}
+
+/**
+ * Unlike reactivateDataSource, this has a real guard — refused with a 409 (code
+ * DATA_SOURCE_NOT_ACTIVE) if the connection's parent data source is itself
+ * inactive (confirmed via reactivate_connection in service.py), so an active
+ * connection can never hang off an inactive data source. The 409 message already
+ * names the parent data source and says to reactivate it first.
+ */
+export function reactivateConnection(connectionId: string): Promise<ConnectionResponse> {
+  return apiRequest(`/connections/${connectionId}/reactivate`, { method: 'POST' });
 }
 
 export function testConnection(connectionId: string): Promise<ConnectionResponse> {

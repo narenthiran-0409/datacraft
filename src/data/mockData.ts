@@ -670,6 +670,7 @@ export const INITIAL_EXPLORER_DATASETS: ExplorerDataset[] = [
     rowCountEstimate: 12418,
     lastDiscoveredAt: 'Mar 02, 2026',
     isActive: true,
+    connectionInactive: false,
   },
   {
     id: 'ds-2',
@@ -679,6 +680,7 @@ export const INITIAL_EXPLORER_DATASETS: ExplorerDataset[] = [
     rowCountEstimate: 45200,
     lastDiscoveredAt: 'Mar 01, 2026',
     isActive: true,
+    connectionInactive: false,
   },
   {
     id: 'ds-3',
@@ -688,6 +690,7 @@ export const INITIAL_EXPLORER_DATASETS: ExplorerDataset[] = [
     rowCountEstimate: 3120,
     lastDiscoveredAt: 'Jan 14, 2026',
     isActive: false,
+    connectionInactive: false,
   },
   {
     id: 'ds-4',
@@ -697,6 +700,7 @@ export const INITIAL_EXPLORER_DATASETS: ExplorerDataset[] = [
     rowCountEstimate: 8100,
     lastDiscoveredAt: 'Feb 20, 2026',
     isActive: true,
+    connectionInactive: false,
   },
   {
     id: 'ds-5',
@@ -706,6 +710,7 @@ export const INITIAL_EXPLORER_DATASETS: ExplorerDataset[] = [
     rowCountEstimate: 3500,
     lastDiscoveredAt: 'Feb 18, 2026',
     isActive: true,
+    connectionInactive: false,
   },
 ];
 

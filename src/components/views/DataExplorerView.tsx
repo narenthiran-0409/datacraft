@@ -18,6 +18,7 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
 }) => {
   const [expandedSchemas, setExpandedSchemas] = useState<string[]>([schemas[0]?.id].filter(Boolean));
   const [expandedDatasets, setExpandedDatasets] = useState<string[]>([]);
+  const [showInactiveConnections, setShowInactiveConnections] = useState(false);
 
   const toggleSchema = (id: string) => {
     setExpandedSchemas((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
@@ -27,26 +28,44 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
     setExpandedDatasets((prev) => (prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id]));
   };
 
+  const inactiveConnectionCount = datasets.filter((d) => d.connectionInactive).length;
+
   return (
     <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-300">
       {/* Header */}
-      <div className="border-b border-outline-variant pb-6">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-primary mb-1 block">
-          Discovered Structure
-        </span>
-        <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
-          Data Explorer
-        </h1>
-        <p className="text-xs text-on-surface-variant mt-1 font-sans max-w-2xl">
-          Browse every schema, dataset, and column Discovery has found. Datasets or columns no
-          longer present at the source stay listed here, muted, rather than disappearing.
-        </p>
+      <div className="border-b border-outline-variant pb-6 flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-primary mb-1 block">
+            Discovered Structure
+          </span>
+          <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
+            Data Explorer
+          </h1>
+          <p className="text-xs text-on-surface-variant mt-1 font-sans max-w-2xl">
+            Browse every schema, dataset, and column Discovery has found. Datasets or columns no
+            longer present at the source stay listed here, muted, rather than disappearing.
+          </p>
+        </div>
+
+        {inactiveConnectionCount > 0 && (
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-on-surface-variant cursor-pointer select-none shrink-0">
+            <input
+              type="checkbox"
+              checked={showInactiveConnections}
+              onChange={(e) => setShowInactiveConnections(e.target.checked)}
+              className="cursor-pointer"
+            />
+            Show datasets with inactive connections ({inactiveConnectionCount})
+          </label>
+        )}
       </div>
 
       {/* Schema Tree */}
       <div className="space-y-4">
         {schemas.map((schema) => {
-          const schemaDatasets = datasets.filter((d) => d.schemaId === schema.id);
+          const schemaDatasets = datasets.filter(
+            (d) => d.schemaId === schema.id && (showInactiveConnections || !d.connectionInactive)
+          );
           const isSchemaOpen = expandedSchemas.includes(schema.id);
 
           return (
@@ -113,6 +132,14 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
                             {!dataset.isActive && (
                               <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-surface-container text-outline shrink-0">
                                 Inactive
+                              </span>
+                            )}
+                            {dataset.connectionInactive && (
+                              <span
+                                className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed shrink-0"
+                                title="This dataset's underlying connection has been deactivated. Informational only — every action below still works normally."
+                              >
+                                Connection Inactive
                               </span>
                             )}
                             <span className="text-[11px] text-outline shrink-0">

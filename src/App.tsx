@@ -30,10 +30,12 @@ import {
   listDataSources,
   updateDataSource as apiUpdateDataSource,
   deleteDataSource as apiDeleteDataSource,
+  reactivateDataSource as apiReactivateDataSource,
   DataSourceUpdateRequest,
   listConnections,
   listConnectionTypes,
   deleteConnection as apiDeleteConnection,
+  reactivateConnection as apiReactivateConnection,
   ConnectionResponse,
   ConnectionTypeResponse,
   listSchemas as apiListSchemas,
@@ -731,6 +733,19 @@ export default function App() {
         datasetCountBySchema.set(d.schema_id, (datasetCountBySchema.get(d.schema_id) ?? 0) + 1);
       });
 
+      // Status propagation (this task): dataset -> schema.connection_id ->
+      // connection.is_active. Derived entirely from data already fetched above
+      // (connections + allSchemas) — no extra per-dataset calls. Distinct from
+      // dataset.is_active (the dataset's own discovery-driven flag, handled
+      // separately and unaffected by this).
+      const connectionActiveById = new Map(connections.map((c) => [c.id, c.is_active]));
+      const connectionIdBySchemaId = new Map(allSchemas.map((s) => [s.id, s.connection_id]));
+      const isSchemaConnectionInactive = (schemaId: string) => {
+        const connectionId = connectionIdBySchemaId.get(schemaId);
+        if (!connectionId) return false;
+        return connectionActiveById.get(connectionId) === false;
+      };
+
       setDeSchemas(
         allSchemas.map((s) => ({ id: s.id, name: s.name, datasetCount: datasetCountBySchema.get(s.id) ?? 0 }))
       );
@@ -743,6 +758,7 @@ export default function App() {
           rowCountEstimate: d.row_count_estimate ?? 0,
           lastDiscoveredAt: formatDateTime(d.discovered_at),
           isActive: d.is_active,
+          connectionInactive: isSchemaConnectionInactive(d.schema_id),
         }))
       );
       setDeColumns(
@@ -822,6 +838,9 @@ export default function App() {
             rowCountEstimate: d.row_count_estimate ?? 0,
             lastDiscoveredAt: formatDateTime(d.discovered_at),
             isActive: d.is_active,
+            // Data Profiling is out of this task's scope — connection status isn't
+            // wired here (this screen doesn't fetch connections/schemas at all).
+            connectionInactive: false,
           }))
         );
         setProfileRuns(runs);
@@ -1778,6 +1797,47 @@ export default function App() {
     }
   };
 
+  // POST /data-sources/{id}/reactivate — no guard (confirmed via
+  // reactivate_data_source in service.py), so this should always succeed given
+  // permission.
+  const handleReactivateDataSource = async (id: string): Promise<boolean> => {
+    setDataSourceActionPendingId(id);
+    setDataSourceActionError(null);
+    try {
+      const reactivated = await apiReactivateDataSource(id);
+      setDataSources((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, isActive: true, status: 'connected' } : s))
+      );
+      triggerToast(`"${reactivated.name}" reactivated`);
+      return true;
+    } catch (err) {
+      setDataSourceActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setDataSourceActionPendingId(null);
+    }
+  };
+
+  // POST /connections/{id}/reactivate — refused with a 409 (DATA_SOURCE_NOT_ACTIVE)
+  // if the parent data source is itself inactive (confirmed via
+  // reactivate_connection in service.py). That message already names the parent
+  // and says to reactivate it first, so it's surfaced as-is rather than reworded.
+  const handleReactivateConnection = async (id: string): Promise<boolean> => {
+    setConnectionActionPendingId(id);
+    setConnectionActionError(null);
+    try {
+      const reactivated = await apiReactivateConnection(id);
+      setDataSourceConnections((prev) => prev.map((c) => (c.id === id ? reactivated : c)));
+      triggerToast(`Connection "${reactivated.name}" reactivated`);
+      return true;
+    } catch (err) {
+      setConnectionActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setConnectionActionPendingId(null);
+    }
+  };
+
   // Real POST /ai/chat — no more fake keyword matching or setTimeout. Sends
   // copilotConversationId if one exists yet (server creates one on the first call
   // when omitted); real loading/error state via the existing ApiError pattern.
@@ -2597,6 +2657,8 @@ export default function App() {
                 connectionActionPendingId={connectionActionPendingId}
                 connectionActionError={connectionActionError}
                 onDeactivateConnection={handleDeactivateConnection}
+                onReactivateSource={handleReactivateDataSource}
+                onReactivateConnection={handleReactivateConnection}
               />
             )}
 
@@ -2615,13 +2677,22 @@ export default function App() {
                     onNavigate={handleNavigate}
                     dataset={selectedDataset}
                     columns={selectedDatasetColumns}
+                    connectionInactive={
+                      deDatasets.find((d) => d.id === selectedDatasetId)?.connectionInactive ?? false
+                    }
                   />
                 )
               )
             ))}
 
           {currentScreen === 'dataset-preview' && (
-            <DatasetPreviewView onNavigate={handleNavigate} />
+            <DatasetPreviewView
+              onNavigate={handleNavigate}
+              datasetName={selectedDataset?.name}
+              connectionInactive={
+                deDatasets.find((d) => d.id === selectedDatasetId)?.connectionInactive ?? false
+              }
+            />
           )}
 
           {currentScreen === 'data-explorer' &&

@@ -185,6 +185,11 @@ export interface ExplorerDataset {
   rowCountEstimate: number;
   lastDiscoveredAt: string;
   isActive: boolean;
+  // Additive (this task): derived client-side from schema.connection_id ->
+  // connection.is_active, distinct from isActive above (which is the dataset's
+  // own discovery-driven flag, unrelated to connection management). Visual only —
+  // never used to block/disable any action.
+  connectionInactive: boolean;
 }
 
 export interface ExplorerColumn {
