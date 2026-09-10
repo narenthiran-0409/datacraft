@@ -33,6 +33,7 @@ import {
   DataSourceUpdateRequest,
   listConnections,
   listConnectionTypes,
+  deleteConnection as apiDeleteConnection,
   ConnectionResponse,
   ConnectionTypeResponse,
   listSchemas as apiListSchemas,
@@ -408,6 +409,13 @@ export default function App() {
   const [dataSourcesError, setDataSourcesError] = useState<string | null>(null);
   const [dataSourceActionPendingId, setDataSourceActionPendingId] = useState<string | null>(null);
   const [dataSourceActionError, setDataSourceActionError] = useState<string | null>(null);
+  // Connections (this task) — the raw list + types, kept in state (not just a
+  // local map inside the fetch effect) so the Manage Connections modal can
+  // render and update them after a real deactivate call.
+  const [dataSourceConnections, setDataSourceConnections] = useState<ConnectionResponse[]>([]);
+  const [dataSourceConnectionTypes, setDataSourceConnectionTypes] = useState<ConnectionTypeResponse[]>([]);
+  const [connectionActionPendingId, setConnectionActionPendingId] = useState<string | null>(null);
+  const [connectionActionError, setConnectionActionError] = useState<string | null>(null);
 
   // Data Explorer — separate from the mock schemas/explorerDatasets/explorerColumns
   // above (those stay mock for Validation Workspace's sake).
@@ -676,6 +684,8 @@ export default function App() {
           };
         });
         setDataSources(mapped);
+        setDataSourceConnections(connections);
+        setDataSourceConnectionTypes(connectionTypes);
       })
       .catch((err) => {
         if (!cancelled) setDataSourcesError(extractErrorMessage(err));
@@ -1744,6 +1754,30 @@ export default function App() {
     }
   };
 
+  // DELETE /connections/{id} is also a soft deactivate (confirmed via
+  // deactivate_connection in app/modules/connections/service.py — is_active set to
+  // false, row kept), but unlike data sources it has NO active-connections-style
+  // guard: no downstream dependency check at all, so this should always succeed
+  // given permission. This is the action the Data Sources screen was missing —
+  // without it, a data source with an active connection could never be deactivated
+  // from the UI (the connections.manage-gated guard on the data source side had no
+  // corresponding UI to actually clear it).
+  const handleDeactivateConnection = async (id: string): Promise<boolean> => {
+    setConnectionActionPendingId(id);
+    setConnectionActionError(null);
+    try {
+      const deactivated = await apiDeleteConnection(id);
+      setDataSourceConnections((prev) => prev.map((c) => (c.id === id ? deactivated : c)));
+      triggerToast(`Connection "${deactivated.name}" deactivated`);
+      return true;
+    } catch (err) {
+      setConnectionActionError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setConnectionActionPendingId(null);
+    }
+  };
+
   // Real POST /ai/chat — no more fake keyword matching or setTimeout. Sends
   // copilotConversationId if one exists yet (server creates one on the first call
   // when omitted); real loading/error state via the existing ApiError pattern.
@@ -2557,6 +2591,12 @@ export default function App() {
                 actionError={dataSourceActionError}
                 onUpdateSource={handleUpdateDataSource}
                 onDeleteSource={handleDeleteDataSource}
+                connections={dataSourceConnections}
+                connectionTypes={dataSourceConnectionTypes}
+                canManageConnections={hasPermission('connections.manage')}
+                connectionActionPendingId={connectionActionPendingId}
+                connectionActionError={connectionActionError}
+                onDeactivateConnection={handleDeactivateConnection}
               />
             )}
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DataSource, NavScreen } from '../../types';
-import { DataSourceUpdateRequest } from '../../api/client';
+import { ConnectionResponse, ConnectionTypeResponse, DataSourceUpdateRequest } from '../../api/client';
 
 interface DataSourcesViewProps {
   dataSources: DataSource[];
@@ -12,6 +12,12 @@ interface DataSourcesViewProps {
   actionError: string | null;
   onUpdateSource: (id: string, input: DataSourceUpdateRequest) => Promise<boolean>;
   onDeleteSource: (id: string) => Promise<boolean>;
+  connections: ConnectionResponse[];
+  connectionTypes: ConnectionTypeResponse[];
+  canManageConnections: boolean;
+  connectionActionPendingId: string | null;
+  connectionActionError: string | null;
+  onDeactivateConnection: (id: string) => Promise<boolean>;
 }
 
 export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
@@ -24,6 +30,12 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   actionError,
   onUpdateSource,
   onDeleteSource,
+  connections,
+  connectionTypes,
+  canManageConnections,
+  connectionActionPendingId,
+  connectionActionError,
+  onDeactivateConnection,
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'database' | 'api' | 'file'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -32,6 +44,10 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   const [editingSource, setEditingSource] = useState<DataSource | null>(null);
   const [editForm, setEditForm] = useState({ description: '', ownerTeam: '', businessDomain: '' });
   const [deletingSource, setDeletingSource] = useState<DataSource | null>(null);
+  const [managingConnectionsFor, setManagingConnectionsFor] = useState<DataSource | null>(null);
+  const [deactivatingConnection, setDeactivatingConnection] = useState<ConnectionResponse | null>(null);
+
+  const connectionTypeById = new Map(connectionTypes.map((t) => [t.id, t]));
 
   const inactiveCount = dataSources.filter((s) => !s.isActive).length;
 
@@ -79,6 +95,12 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
     if (!deletingSource) return;
     const ok = await onDeleteSource(deletingSource.id);
     if (ok) setDeletingSource(null);
+  };
+
+  const handleDeactivateConnectionConfirm = async () => {
+    if (!deactivatingConnection) return;
+    const ok = await onDeactivateConnection(deactivatingConnection.id);
+    if (ok) setDeactivatingConnection(null);
   };
 
   return (
@@ -286,6 +308,24 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                 </button>
 
                 <div className="flex items-center gap-3">
+                  {(() => {
+                    const sourceConnections = connections.filter((c) => c.data_source_id === source.id);
+                    return (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setManagingConnectionsFor(source);
+                        }}
+                        title="Manage connections"
+                        className="flex items-center gap-1 p-1.5 rounded text-on-surface-variant hover:text-primary hover:bg-surface-container-low transition-colors cursor-pointer text-[11px] font-semibold"
+                      >
+                        <span className="material-symbols-outlined text-lg">cable</span>
+                        {sourceConnections.length > 0 && <span>{sourceConnections.length}</span>}
+                      </button>
+                    );
+                  })()}
+
                   {canManage && (
                     <div className="flex items-center gap-1">
                       <button
@@ -491,6 +531,160 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                 className="px-5 py-2.5 rounded-md bg-error hover:opacity-90 text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
               >
                 {actionPendingId === deletingSource.id ? 'Removing…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Connections Modal */}
+      {managingConnectionsFor && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-xl w-full p-6 space-y-5 animate-in zoom-in-95 duration-200 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-surface-container pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-md bg-surface-container-high text-primary flex items-center justify-center">
+                  <span className="material-symbols-outlined text-2xl">cable</span>
+                </div>
+                <div>
+                  <h3 className="font-editorial text-xl font-bold text-on-surface">Connections</h3>
+                  <p className="text-xs text-outline">{managingConnectionsFor.name}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setManagingConnectionsFor(null)}
+                className="p-1 text-outline hover:text-on-surface rounded transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            {!canManageConnections && (
+              <div className="bg-surface-container-low rounded-md border border-outline-variant p-3.5 flex items-center gap-2 text-xs text-on-surface-variant">
+                <span className="material-symbols-outlined text-base text-outline">lock</span>
+                You have read-only access to connections — deactivating one requires the
+                connections.manage permission.
+              </div>
+            )}
+
+            {connectionActionError && (
+              <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                <span className="font-medium leading-relaxed">{connectionActionError}</span>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {connections.filter((c) => c.data_source_id === managingConnectionsFor.id).length === 0 ? (
+                <p className="text-xs text-outline italic">No connections configured for this data source.</p>
+              ) : (
+                connections
+                  .filter((c) => c.data_source_id === managingConnectionsFor.id)
+                  .map((c) => {
+                    const isPending = connectionActionPendingId === c.id;
+                    return (
+                      <div
+                        key={c.id}
+                        className={`rounded-md border border-outline-variant p-3.5 flex items-center justify-between gap-3 ${
+                          c.is_active ? 'bg-white' : 'bg-surface-container-low opacity-70'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-bold text-on-surface truncate">{c.name}</span>
+                            <span
+                              className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                c.is_active
+                                  ? 'bg-primary-fixed text-on-primary-fixed'
+                                  : 'bg-surface-container text-outline'
+                              }`}
+                            >
+                              {c.is_active ? 'Active' : 'Inactive'}
+                            </span>
+                            <span className="text-[10px] font-semibold text-outline uppercase">
+                              {c.environment}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-on-surface-variant font-mono mt-0.5 truncate">
+                            {connectionTypeById.get(c.connection_type_id)?.display_name ?? 'Unknown type'} —{' '}
+                            {c.host}:{c.port}
+                          </p>
+                          <p className="text-[10px] text-outline mt-0.5">
+                            {c.last_tested_at
+                              ? `Last tested: ${c.status} (${new Date(c.last_tested_at).toLocaleString()})`
+                              : 'Never tested'}
+                          </p>
+                        </div>
+                        {canManageConnections && c.is_active && (
+                          <button
+                            type="button"
+                            onClick={() => setDeactivatingConnection(c)}
+                            disabled={isPending}
+                            title="Deactivate connection"
+                            className="p-1.5 rounded text-on-surface-variant hover:text-error hover:bg-error-container transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          >
+                            <span className="material-symbols-outlined text-lg">link_off</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+              )}
+            </div>
+
+            <div className="pt-2 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setManagingConnectionsFor(null)}
+                className="px-4 py-2.5 rounded-md border border-outline-variant text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deactivate Connection Confirmation Modal */}
+      {deactivatingConnection && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-md w-full p-6 space-y-5 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-md bg-error-container text-on-error-container flex items-center justify-center">
+                <span className="material-symbols-outlined text-2xl">link_off</span>
+              </div>
+              <h3 className="font-editorial text-xl font-bold text-on-surface">Deactivate Connection</h3>
+            </div>
+
+            <p className="text-xs text-on-surface-variant leading-relaxed">
+              This will deactivate <strong className="text-on-surface">"{deactivatingConnection.name}"</strong>.
+              It will no longer count as an active connection for this data source (so the data source can be
+              deleted once all of its connections are deactivated), but the connection record itself isn't
+              deleted. As with data sources, there is currently no way to reactivate it from within DataCraft.
+            </p>
+
+            {connectionActionError && (
+              <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                <span className="font-medium leading-relaxed">{connectionActionError}</span>
+              </div>
+            )}
+
+            <div className="pt-2 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDeactivatingConnection(null)}
+                className="px-4 py-2.5 rounded-md border border-outline-variant text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeactivateConnectionConfirm}
+                disabled={connectionActionPendingId === deactivatingConnection.id}
+                className="px-5 py-2.5 rounded-md bg-error hover:opacity-90 text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
+              >
+                {connectionActionPendingId === deactivatingConnection.id ? 'Deactivating…' : 'Deactivate'}
               </button>
             </div>
           </div>
