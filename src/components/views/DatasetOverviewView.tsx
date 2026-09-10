@@ -139,25 +139,27 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
               <span>Edit Schema</span>
             </button>
 
-            <button
-              onClick={handleRunCheck}
-              disabled={isRunningCheck}
-              className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] disabled:opacity-80 cursor-pointer"
-            >
-              <span
-                className={`material-symbols-outlined text-lg ${
-                  isRunningCheck ? 'animate-spin' : ''
-                }`}
+            {!connectionInactive && (
+              <button
+                onClick={handleRunCheck}
+                disabled={isRunningCheck}
+                className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] disabled:opacity-80 cursor-pointer"
               >
-                {isRunningCheck ? 'sync' : 'play_circle'}
-              </span>
-              <span>{isRunningCheck ? `Scanning ~${rowCount.toLocaleString()} Rows...` : 'Run Data Check'}</span>
-            </button>
+                <span
+                  className={`material-symbols-outlined text-lg ${
+                    isRunningCheck ? 'animate-spin' : ''
+                  }`}
+                >
+                  {isRunningCheck ? 'sync' : 'play_circle'}
+                </span>
+                <span>{isRunningCheck ? `Scanning ~${rowCount.toLocaleString()} Rows...` : 'Run Data Check'}</span>
+              </button>
+            )}
           </div>
         </div>
 
         {/* Live Validation Alert Notification */}
-        {checkFinished && (
+        {checkFinished && !connectionInactive && (
           <div className="mt-4 p-3 bg-surface-container-high/60 border border-outline-variant text-primary rounded-md text-xs flex items-center justify-between animate-in fade-in slide-in-from-top-2">
             <div className="flex items-center gap-2 font-medium">
               <span className="material-symbols-outlined text-base text-primary">
@@ -173,48 +175,82 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
           </div>
         )}
 
-        {/* Sub-Navigation Tabs */}
-        <div className="flex items-center gap-8 mt-8 border-b border-surface-container">
-          <button
-            onClick={() => setActiveTab('overview')}
-            className={`pb-3 text-sm font-semibold transition-all relative cursor-pointer ${
-              activeTab === 'overview'
-                ? 'text-primary'
-                : 'text-outline hover:text-on-surface'
-            }`}
-          >
-            Overview
-            {activeTab === 'overview' && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-            )}
-          </button>
+        {/* Sub-Navigation Tabs — hidden when the connection is inactive (see the
+            centered state card below instead): every tab here is either fully
+            mock content (Overview) or navigates to a screen scoped to this same
+            dataset, so none of it is meaningful while the underlying connection
+            is deactivated. */}
+        {!connectionInactive && (
+          <div className="flex items-center gap-8 mt-8 border-b border-surface-container">
+            <button
+              onClick={() => setActiveTab('overview')}
+              className={`pb-3 text-sm font-semibold transition-all relative cursor-pointer ${
+                activeTab === 'overview'
+                  ? 'text-primary'
+                  : 'text-outline hover:text-on-surface'
+              }`}
+            >
+              Overview
+              {activeTab === 'overview' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
+              )}
+            </button>
 
-          <button
-            onClick={() => onNavigate('dataset-preview')}
-            className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
-          >
-            Preview Table
-          </button>
+            <button
+              onClick={() => onNavigate('dataset-preview')}
+              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
+            >
+              Preview Table
+            </button>
 
-          <button
-            onClick={() => onNavigate('quality-rules')}
-            className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
-          >
-            Quality Rules (6)
-          </button>
+            <button
+              onClick={() => onNavigate('quality-rules')}
+              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
+            >
+              Quality Rules (6)
+            </button>
 
-          <button
-            onClick={() => onNavigate('approval-center')}
-            className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all flex items-center gap-1.5 cursor-pointer"
-          >
-            <span>Pending Approvals</span>
-            <span className="bg-secondary text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
-              1
-            </span>
-          </button>
-        </div>
+            <button
+              onClick={() => onNavigate('approval-center')}
+              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>Pending Approvals</span>
+              <span className="bg-secondary text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
+                1
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
+      {connectionInactive ? (
+        /* Connection Inactive — replaces the (mock) Overview content below rather
+           than showing fabricated metrics/issues/activity alongside a badge saying
+           the underlying connection is deactivated. */
+        <div className="flex items-center justify-center py-20">
+          <div className="max-w-md w-full bg-white rounded-lg border border-outline-variant shadow-ambient p-8 text-center">
+            <div className="w-14 h-14 rounded-full bg-secondary-fixed text-on-secondary-fixed flex items-center justify-center mx-auto mb-4">
+              <span className="material-symbols-outlined text-3xl">cable</span>
+            </div>
+            <h3 className="font-editorial text-xl font-bold text-on-surface">
+              Connection Inactive
+            </h3>
+            <p className="text-xs text-on-surface-variant leading-relaxed mt-2">
+              The connection this dataset was discovered through has been deactivated, so
+              overview metrics and previews aren't shown here. The dataset itself hasn't been
+              changed — reactivate the connection from Data Sources to see this dataset's
+              details again.
+            </p>
+            <button
+              onClick={() => onNavigate('data-sources')}
+              className="mt-5 px-5 py-2.5 bg-primary hover:bg-primary-container text-white rounded-md text-xs font-semibold transition-colors shadow-ambient cursor-pointer"
+            >
+              Go to Data Sources
+            </button>
+          </div>
+        </div>
+      ) : (
+      <>
       {/* Quality Highlights (3 Cards) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {metrics.map((m, idx) => (
@@ -405,6 +441,8 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };

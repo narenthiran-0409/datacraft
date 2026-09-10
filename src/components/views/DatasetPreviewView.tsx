@@ -94,31 +94,59 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
               </span>
             )}
           </div>
-          <p className="text-xs text-outline mt-1 font-sans">
-            Sample rows shown below are illustrative placeholder data, not a live read from{' '}
-            {datasetName ?? 'this dataset'}.
-          </p>
+          {!connectionInactive && (
+            <p className="text-xs text-outline mt-1 font-sans">
+              Sample rows shown below are illustrative placeholder data, not a live read from{' '}
+              {datasetName ?? 'this dataset'}.
+            </p>
+          )}
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => onNavigate('review-corrections')}
-            className="flex items-center gap-2 bg-secondary-fixed hover:bg-secondary-fixed-dim text-secondary px-4 py-2.5 rounded-md font-medium text-xs border border-secondary/20 transition-colors shadow-2xs cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-base">warning</span>
-            <span>Review 14 Format Issues</span>
-          </button>
+        {!connectionInactive && (
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => onNavigate('review-corrections')}
+              className="flex items-center gap-2 bg-secondary-fixed hover:bg-secondary-fixed-dim text-secondary px-4 py-2.5 rounded-md font-medium text-xs border border-secondary/20 transition-colors shadow-2xs cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">warning</span>
+              <span>Review 14 Format Issues</span>
+            </button>
 
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-base">download</span>
-            <span>Export CSV</span>
-          </button>
-        </div>
+            <button
+              onClick={handleExportCSV}
+              className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-base">download</span>
+              <span>Export CSV</span>
+            </button>
+          </div>
+        )}
       </div>
 
+      {connectionInactive ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="max-w-md w-full bg-white rounded-lg border border-outline-variant shadow-ambient p-8 text-center">
+            <div className="w-14 h-14 rounded-full bg-secondary-fixed text-on-secondary-fixed flex items-center justify-center mx-auto mb-4">
+              <span className="material-symbols-outlined text-3xl">cable</span>
+            </div>
+            <h3 className="font-editorial text-xl font-bold text-on-surface">
+              Connection Inactive
+            </h3>
+            <p className="text-xs text-on-surface-variant leading-relaxed mt-2">
+              The connection this dataset was discovered through has been deactivated, so a
+              preview isn't shown here. Reactivate the connection from Data Sources to preview
+              this dataset again.
+            </p>
+            <button
+              onClick={() => onNavigate('data-sources')}
+              className="mt-5 px-5 py-2.5 bg-primary hover:bg-primary-container text-white rounded-md text-xs font-semibold transition-colors shadow-ambient cursor-pointer"
+            >
+              Go to Data Sources
+            </button>
+          </div>
+        </div>
+      ) : (
+      <>
       {/* Filter and Search Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
         {/* Status Pills */}
@@ -307,6 +335,8 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };
