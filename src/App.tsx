@@ -37,6 +37,7 @@ import {
   listConnectionTypes,
   deleteConnection as apiDeleteConnection,
   reactivateConnection as apiReactivateConnection,
+  discoverConnection as apiDiscoverConnection,
   ConnectionResponse,
   ConnectionTypeResponse,
   listSchemas as apiListSchemas,
@@ -460,6 +461,11 @@ export default function App() {
   const [dataSourceConnectionTypes, setDataSourceConnectionTypes] = useState<ConnectionTypeResponse[]>([]);
   const [connectionActionPendingId, setConnectionActionPendingId] = useState<string | null>(null);
   const [connectionActionError, setConnectionActionError] = useState<string | null>(null);
+  // "Sync Now" (this task) — was pure local mock (setTimeout + unconditional
+  // success toast, zero network calls). Keyed by connection id, since discovery
+  // runs against a connection, not a data source directly.
+  const [syncingConnectionId, setSyncingConnectionId] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // Data Explorer — separate from the mock schemas/explorerDatasets/explorerColumns
   // above (those stay mock for Validation Workspace's sake).
@@ -670,77 +676,110 @@ export default function App() {
   // --- Real-data fetches, one per read-only screen, triggered on navigation ---------
 
   // Data Sources: GET data-sources (+ connections/connection-types, each independently
-  // permission-gated so a user missing only one still sees what they can).
-  useEffect(() => {
-    if (currentScreen !== 'data-sources') return;
-    if (!hasPermission('data_sources.read')) return;
-
-    let cancelled = false;
+  // permission-gated so a user missing only one still sees what they can). Extracted
+  // into a standalone function (not just inline in the effect) so the real Sync Now
+  // fix below can call it again after a discovery job completes, to pick up the real
+  // dataset count — refetching is the only way to see it, same reasoning as
+  // handleGenerateSuggestions elsewhere in this file.
+  const refreshDataSources = async (): Promise<void> => {
     setDataSourcesLoading(true);
     setDataSourcesError(null);
     const canReadConnections = hasPermission('connections.read');
 
-    Promise.all([
-      listDataSources(),
-      canReadConnections ? listConnections() : Promise.resolve<ConnectionResponse[]>([]),
-      canReadConnections ? listConnectionTypes() : Promise.resolve<ConnectionTypeResponse[]>([]),
-    ])
-      .then(([sources, connections, connectionTypes]) => {
-        if (cancelled) return;
-        const typeById = new Map(connectionTypes.map((t) => [t.id, t]));
-        const connectionsBySource = new Map<string, ConnectionResponse[]>();
-        connections.forEach((c) => {
-          connectionsBySource.set(c.data_source_id, [...(connectionsBySource.get(c.data_source_id) ?? []), c]);
-        });
+    try {
+      const [sources, connections, connectionTypes] = await Promise.all([
+        listDataSources(),
+        canReadConnections ? listConnections() : Promise.resolve<ConnectionResponse[]>([]),
+        canReadConnections ? listConnectionTypes() : Promise.resolve<ConnectionTypeResponse[]>([]),
+      ]);
 
-        const mapped: DataSource[] = sources.map((s) => {
-          const conns = connectionsBySource.get(s.id) ?? [];
-          const primary = conns[0];
-          const connTypeCode = (primary ? typeById.get(primary.connection_type_id)?.code : undefined) ?? '';
-          const type: DataSource['type'] = connTypeCode.toUpperCase().includes('FILE')
-            ? 'file'
-            : connTypeCode.toUpperCase().includes('API')
-            ? 'api'
-            : 'database';
+      // Real per-data-source dataset count (this task) — was hardcoded to 0 with a
+      // comment claiming no endpoint existed for it. One does, just not directly:
+      // dataset -> schema.connection_id -> connection.data_source_id, the same chain
+      // already traced for Data Explorer's connection-status propagation. Degrades to
+      // 0 (not an error for the whole screen) if metadata.read is missing or the
+      // schema/dataset fetch itself fails — this is an enhancement on top of the real
+      // fix below, not something that should block the screen from loading at all.
+      const datasetCountByDataSourceId = new Map<string, number>();
+      if (canReadConnections && hasPermission('metadata.read') && connections.length > 0) {
+        try {
+          const schemaLists = await Promise.all(
+            connections.map((c) => apiListSchemas(c.id).catch(() => [] as SchemaResponse[]))
+          );
+          const dataSourceIdByConnectionId = new Map(connections.map((c) => [c.id, c.data_source_id]));
+          const dataSourceIdBySchemaId = new Map<string, string>();
+          schemaLists.forEach((list) =>
+            list.forEach((s) => {
+              const dsId = dataSourceIdByConnectionId.get(s.connection_id);
+              if (dsId) dataSourceIdBySchemaId.set(s.id, dsId);
+            })
+          );
 
-          return {
-            id: s.id,
-            name: s.name,
-            type,
-            typeLabel:
-              (primary && typeById.get(primary.connection_type_id)?.display_name) ||
-              (canReadConnections ? 'No connection configured' : 'Connections not visible to you'),
-            // is_active is the only real status signal available from this screen's
-            // scoped endpoints — connection.status values aren't documented/confirmed,
-            // so this doesn't try to distinguish "syncing" from "connected". BUG FIX
-            // (this task): was `s.is_active ? 'connected' : 'failed'`, which showed a
-            // deactivated source as "Sync Failed" — misleading, since deactivation is
-            // deliberate, not a technical failure.
-            status: s.is_active ? 'connected' : 'inactive',
-            description: s.description || s.business_domain || 'No description provided.',
-            datasetsCount: 0, // no per-source dataset count endpoint in this screen's scope
-            lastSync: formatDateTime(s.updated_at ?? s.created_at),
-            icon: type === 'database' ? 'database' : type === 'api' ? 'cloud' : 'description',
-            host: primary ? `${primary.host}:${primary.port}` : undefined,
-            isActive: s.is_active,
-            ownerTeam: s.owner_team,
-            businessDomain: s.business_domain,
-          };
-        });
-        setDataSources(mapped);
-        setDataSourceConnections(connections);
-        setDataSourceConnectionTypes(connectionTypes);
-      })
-      .catch((err) => {
-        if (!cancelled) setDataSourcesError(extractErrorMessage(err));
-      })
-      .finally(() => {
-        if (!cancelled) setDataSourcesLoading(false);
+          const datasetsResp = await listDatasets({ page_size: 200 });
+          datasetsResp.items.forEach((d) => {
+            const dsId = dataSourceIdBySchemaId.get(d.schema_id);
+            if (!dsId) return;
+            datasetCountByDataSourceId.set(dsId, (datasetCountByDataSourceId.get(dsId) ?? 0) + 1);
+          });
+        } catch {
+          // Leave counts at 0 — see comment above.
+        }
+      }
+
+      const typeById = new Map(connectionTypes.map((t) => [t.id, t]));
+      const connectionsBySource = new Map<string, ConnectionResponse[]>();
+      connections.forEach((c) => {
+        connectionsBySource.set(c.data_source_id, [...(connectionsBySource.get(c.data_source_id) ?? []), c]);
       });
 
-    return () => {
-      cancelled = true;
-    };
+      const mapped: DataSource[] = sources.map((s) => {
+        const conns = connectionsBySource.get(s.id) ?? [];
+        const primary = conns[0];
+        const connTypeCode = (primary ? typeById.get(primary.connection_type_id)?.code : undefined) ?? '';
+        const type: DataSource['type'] = connTypeCode.toUpperCase().includes('FILE')
+          ? 'file'
+          : connTypeCode.toUpperCase().includes('API')
+          ? 'api'
+          : 'database';
+
+        return {
+          id: s.id,
+          name: s.name,
+          type,
+          typeLabel:
+            (primary && typeById.get(primary.connection_type_id)?.display_name) ||
+            (canReadConnections ? 'No connection configured' : 'Connections not visible to you'),
+          // is_active is the only real status signal available from this screen's
+          // scoped endpoints — connection.status values aren't documented/confirmed,
+          // so this doesn't try to distinguish "syncing" from "connected". BUG FIX
+          // (earlier task): was `s.is_active ? 'connected' : 'failed'`, which showed a
+          // deactivated source as "Sync Failed" — misleading, since deactivation is
+          // deliberate, not a technical failure.
+          status: s.is_active ? 'connected' : 'inactive',
+          description: s.description || s.business_domain || 'No description provided.',
+          datasetsCount: datasetCountByDataSourceId.get(s.id) ?? 0,
+          lastSync: formatDateTime(s.updated_at ?? s.created_at),
+          icon: type === 'database' ? 'database' : type === 'api' ? 'cloud' : 'description',
+          host: primary ? `${primary.host}:${primary.port}` : undefined,
+          isActive: s.is_active,
+          ownerTeam: s.owner_team,
+          businessDomain: s.business_domain,
+        };
+      });
+      setDataSources(mapped);
+      setDataSourceConnections(connections);
+      setDataSourceConnectionTypes(connectionTypes);
+    } catch (err) {
+      setDataSourcesError(extractErrorMessage(err));
+    } finally {
+      setDataSourcesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentScreen !== 'data-sources') return;
+    if (!hasPermission('data_sources.read')) return;
+    refreshDataSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScreen]);
 
@@ -1718,16 +1757,6 @@ export default function App() {
     }
   };
 
-  const handleSyncSource = (id: string) => {
-    const target = dataSources.find((s) => s.id === id);
-    setDataSources((prev) =>
-      prev.map((s) =>
-        s.id === id ? { ...s, status: 'connected', lastSync: 'Just now' } : s
-      )
-    );
-    triggerToast(`Synced "${target?.name}" successfully`);
-  };
-
   // database category: the data source + connection were already created for real
   // inside AddDataSourceView, so there's nothing to add locally — just navigate back;
   // the Data Sources screen's own fetch-on-navigate effect (Phase 1) picks it up.
@@ -1901,6 +1930,54 @@ export default function App() {
       return false;
     } finally {
       setConnectionActionPendingId(null);
+    }
+  };
+
+  // BUG FIX (root cause of "Sync Now shows success but dataset count stays 0"):
+  // handleSyncSource below used to be pure local mock — setTimeout + an
+  // unconditional success toast, with zero network calls at all. It never called
+  // discoverConnection() (already correctly typed in client.ts against the real
+  // POST /connections/{id}/discover, confirmed against app/api/v1/connections/
+  // routes.py — that function itself was fine, just never wired to this button).
+  // Real fix: call it for real, poll the resulting job (discovery is async —
+  // 202 + job_id, same shared Job/JobResponse model as everything else in this
+  // app), and only show success / refresh the real dataset count once the job
+  // has actually completed. A real, visible error otherwise (e.g. the backend's
+  // own DiscoveryAlreadyRunningError 409 if a sync is already in flight).
+  const pollDiscoveryJob = async (jobId: string): Promise<void> => {
+    const start = Date.now();
+    for (;;) {
+      const job: JobResponse = await apiGetJob(jobId);
+      if (job.status === 'COMPLETED') return;
+      if (job.status === 'FAILED') throw new Error(job.error_message || 'Discovery failed');
+      if (job.status === 'CANCELLED') throw new Error('Discovery was cancelled before it finished');
+      if (Date.now() - start > 120_000) throw new Error('Timed out waiting for discovery to complete');
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  };
+
+  const handleSyncConnection = async (connectionId: string, dataSourceName: string) => {
+    setSyncingConnectionId(connectionId);
+    setSyncError(null);
+    try {
+      const job = await apiDiscoverConnection(connectionId);
+      await pollDiscoveryJob(job.id);
+      // Refetch first (picks up the real, now-updated dataset count), then layer
+      // "Just now" on top — the backend has no "last discovered at" field on
+      // Connection/DataSource (only last_tested_at, set by test_connection, a
+      // different endpoint), so this is a real, session-only signal that a sync
+      // genuinely just completed, not a fabricated persisted timestamp; it would
+      // otherwise be immediately overwritten by refreshDataSources' own
+      // formatDateTime(updated_at) if applied before the refetch.
+      await refreshDataSources();
+      setDataSources((prev) =>
+        prev.map((s) => (s.name === dataSourceName ? { ...s, lastSync: 'Just now' } : s))
+      );
+      triggerToast(`Synced "${dataSourceName}" successfully`);
+    } catch (err) {
+      setSyncError(extractErrorMessage(err));
+    } finally {
+      setSyncingConnectionId(null);
     }
   };
 
@@ -2712,7 +2789,9 @@ export default function App() {
                 dataSources={dataSources}
                 onNavigate={handleNavigate}
                 onOpenAddSource={() => handleNavigate('add-data-source')}
-                onSyncSource={handleSyncSource}
+                onSyncSource={handleSyncConnection}
+                syncingConnectionId={syncingConnectionId}
+                syncError={syncError}
                 canManage={hasPermission('data_sources.manage')}
                 actionPendingId={dataSourceActionPendingId}
                 actionError={dataSourceActionError}

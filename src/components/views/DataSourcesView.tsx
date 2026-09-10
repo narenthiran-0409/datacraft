@@ -6,7 +6,12 @@ interface DataSourcesViewProps {
   dataSources: DataSource[];
   onNavigate: (screen: NavScreen) => void;
   onOpenAddSource: () => void;
-  onSyncSource: (id: string) => void;
+  // Takes the connection id (discovery runs against a connection, not a data
+  // source) — the view resolves which connection via its own `connections`
+  // prop, since a data source's "Sync Now" targets its primary connection.
+  onSyncSource: (connectionId: string, dataSourceName: string) => void;
+  syncingConnectionId: string | null;
+  syncError: string | null;
   canManage: boolean;
   actionPendingId: string | null;
   actionError: string | null;
@@ -27,6 +32,8 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   onNavigate,
   onOpenAddSource,
   onSyncSource,
+  syncingConnectionId,
+  syncError,
   canManage,
   actionPendingId,
   actionError,
@@ -43,7 +50,6 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'database' | 'api' | 'file'>('all');
   const [searchTerm, setSearchTerm] = useState('');
-  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(false);
   const [editingSource, setEditingSource] = useState<DataSource | null>(null);
   const [editForm, setEditForm] = useState({ description: '', ownerTeam: '', businessDomain: '' });
@@ -65,13 +71,11 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
     return matchesFilter && matchesSearch && matchesActive;
   });
 
-  const handleSyncClick = (id: string, e: React.MouseEvent) => {
+  const handleSyncClick = (source: DataSource, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSyncingId(id);
-    onSyncSource(id);
-    setTimeout(() => {
-      setSyncingId(null);
-    }, 1200);
+    const primaryConnection = connections.find((c) => c.data_source_id === source.id);
+    if (!primaryConnection) return; // button is disabled in this case — see title below
+    onSyncSource(primaryConnection.id, source.name);
   };
 
   const openEdit = (source: DataSource, e: React.MouseEvent) => {
@@ -149,6 +153,12 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
         </div>
       )}
 
+      {syncError && (
+        <div className="bg-error-container border border-outline-variant rounded-lg p-3.5 text-xs text-on-error-container">
+          Sync failed: {syncError}
+        </div>
+      )}
+
       {/* Filter & Search Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
         {/* Type Filter Buttons */}
@@ -207,7 +217,8 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
       {/* Grid of Sources */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredSources.map((source) => {
-          const isSyncing = syncingId === source.id;
+          const primaryConnection = connections.find((c) => c.data_source_id === source.id);
+          const isSyncing = syncingConnectionId !== null && syncingConnectionId === primaryConnection?.id;
           const isFailed = source.status === 'failed';
           const isInactive = source.status === 'inactive';
           const isActionPending = actionPendingId === source.id;
@@ -292,9 +303,15 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
               <div className="mt-6 pt-4 border-t border-surface-container flex items-center justify-between gap-2">
                 <button
                   type="button"
-                  onClick={(e) => handleSyncClick(source.id, e)}
-                  disabled={isSyncing || isInactive}
-                  title={isInactive ? 'Inactive data sources cannot be synced' : undefined}
+                  onClick={(e) => handleSyncClick(source, e)}
+                  disabled={isSyncing || isInactive || !primaryConnection}
+                  title={
+                    isInactive
+                      ? 'Inactive data sources cannot be synced'
+                      : !primaryConnection
+                      ? 'No connection configured for this data source yet'
+                      : undefined
+                  }
                   className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded border transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                     isFailed
                       ? 'border-on-error-container/30 text-on-error-container hover:bg-error-container'
