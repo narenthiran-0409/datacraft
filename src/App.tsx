@@ -55,6 +55,15 @@ import {
   resetUserPassword as apiResetUserPassword,
   listRoles,
   RoleResponse,
+  // AI
+  sendChatMessage,
+  generateExplanation,
+  triggerRunSummary,
+  triggerPrioritization,
+  triggerCluster,
+  triggerCorrections,
+  getAISuggestion,
+  AISuggestionResponse,
   // Rules
   listRules,
   createRule as apiCreateRule,
@@ -80,6 +89,8 @@ import {
   ValidationFailureListResponse,
   // Jobs
   cancelJob as apiCancelJob,
+  getJob as apiGetJob,
+  JobResponse,
   // Review
   createReview,
   listReviews,
@@ -113,7 +124,7 @@ import {
   PublishRunResponse,
 } from './api/client';
 import { usePermissions } from './hooks/usePermissions';
-import { INITIAL_APP_SETTINGS, INITIAL_AI_SUGGESTIONS } from './data/mockData';
+import { INITIAL_APP_SETTINGS } from './data/mockData';
 import { SideNavBar } from './components/layout/SideNavBar';
 import { TopAppBar } from './components/layout/TopAppBar';
 import { DashboardView } from './components/views/DashboardView';
@@ -363,7 +374,11 @@ export default function App() {
   const { hasPermission } = usePermissions(currentUser);
 
   // App State
-  const [aiSuggestions] = useState<AISuggestionItem[]>(INITIAL_AI_SUGGESTIONS);
+  // Real data (this task) — was mock (INITIAL_AI_SUGGESTIONS). Populated only by
+  // explicit user-triggered generation on the AI Insights screen; starts empty.
+  const [aiSuggestions, setAiSuggestions] = useState<AISuggestionItem[]>([]);
+  const [aiGeneratingType, setAiGeneratingType] = useState<string | null>(null);
+  const [aiInsightsError, setAiInsightsError] = useState<string | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(INITIAL_APP_SETTINGS);
 
   // User & Role Management — real data (Phase 3). Shared with Settings, which needs
@@ -525,18 +540,20 @@ export default function App() {
   const [showAICopilot, setShowAICopilot] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // AI Copilot State
+  // AI Copilot State — real POST /ai/chat. conversation_id persists for the whole
+  // session once the first real reply establishes one (server creates it when
+  // omitted); no "new conversation" reset control exists yet. Note: the backend's
+  // chat service does NOT thread prior turns into the model's own context (each
+  // call sends only the latest message — confirmed in chat_service.py) — messages
+  // are genuinely persisted and grouped by conversation_id, but the assistant
+  // itself has no memory of earlier turns beyond what's visible in this history.
   const [copilotInput, setCopilotInput] = useState<string>('');
   const [copilotMessages, setCopilotMessages] = useState<
     Array<{ id: string; role: 'assistant' | 'user'; text: string; time: string }>
-  >([
-    {
-      id: 'm1',
-      role: 'assistant',
-      text: 'Hello Alex. I am your DataCraft intelligence assistant. I can inspect your schemas, generate SQL quality constraints, or explain anomaly patterns in Customer Data.',
-      time: 'Just now',
-    },
-  ]);
+  >([]);
+  const [copilotConversationId, setCopilotConversationId] = useState<string | null>(null);
+  const [isCopilotSending, setIsCopilotSending] = useState(false);
+  const [copilotError, setCopilotError] = useState<string | null>(null);
 
   // Create Rule Form — fields match RuleCreateRequest exactly (rules.manage-gated).
   const [newRuleName, setNewRuleName] = useState('');
@@ -1660,39 +1677,42 @@ export default function App() {
     triggerToast(`Data source "${newSource.name}" successfully registered`);
   };
 
-  const handleSendCopilot = (e: React.FormEvent) => {
+  // Real POST /ai/chat — no more fake keyword matching or setTimeout. Sends
+  // copilotConversationId if one exists yet (server creates one on the first call
+  // when omitted); real loading/error state via the existing ApiError pattern.
+  const handleSendCopilot = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!copilotInput.trim()) return;
-
     const userText = copilotInput.trim();
+    if (!userText || isCopilotSending) return;
+
     const userMsg = {
       id: `usr-${Date.now()}`,
       role: 'user' as const,
       text: userText,
-      time: 'Just now',
+      time: formatDateTime(new Date().toISOString()),
     };
-
     setCopilotMessages((prev) => [...prev, userMsg]);
     setCopilotInput('');
+    setIsCopilotSending(true);
+    setCopilotError(null);
 
-    setTimeout(() => {
-      let reply = `I've analyzed the schema for your query: "${userText}". All active constraints in 'Customer Data' are validating at 98.4% completeness. Would you like me to draft an automated remediation rule?`;
-      if (userText.toLowerCase().includes('email')) {
-        reply = `Email constraint check: Found 14 malformed records in 'users_master' partition with double '@' or missing TLDs. Suggested fix: Standardize via regex rule 'Valid Email Format'.`;
-      } else if (userText.toLowerCase().includes('sql') || userText.toLowerCase().includes('rule')) {
-        reply = `Here is a recommended SQL assertion for your pipeline:\n\nSELECT COUNT(*) FROM users_master WHERE email NOT LIKE '%@%.%' HAVING COUNT(*) = 0;`;
-      }
-
+    try {
+      const resp = await sendChatMessage({ conversation_id: copilotConversationId, message: userText });
+      setCopilotConversationId(resp.conversation_id);
       setCopilotMessages((prev) => [
         ...prev,
         {
-          id: `ast-${Date.now()}`,
+          id: resp.message.id,
           role: 'assistant',
-          text: reply,
-          time: 'Just now',
+          text: resp.message.content,
+          time: formatDateTime(resp.message.created_at),
         },
       ]);
-    }, 600);
+    } catch (err) {
+      setCopilotError(extractErrorMessage(err));
+    } finally {
+      setIsCopilotSending(false);
+    }
   };
 
   // Review & Corrections Actions — every one of these waits for the real response
@@ -1865,6 +1885,160 @@ export default function App() {
       setReviewActionError(extractErrorMessage(err));
     } finally {
       setIsGeneratingSuggestions(false);
+    }
+  };
+
+  // AI Insights — generation handlers (this task). EXPLANATION is synchronous
+  // (response IS the result); RUN_SUMMARY/PRIORITIZATION/CLUSTER are async
+  // (202+job_id) — poll getJob() until COMPLETED, then fetch the real suggestion
+  // via getAISuggestion(). AI corrections are the deliberate exception: they are
+  // never added to aiSuggestions or displayed on this screen — per
+  // suggestion_service.py, generate_corrections() inserts straight into the
+  // pre-existing correction_suggestions table (source="AI"), which the already-
+  // wired Review & Corrections accept/edit/reject flow (see the existing
+  // suggestionSource === 'AI' badge in ReviewCorrectionsView) picks up
+  // automatically via its own listReviewSuggestions() call — no separate AI
+  // accept/reject UI is built here, by design.
+  const mapAISuggestion = (r: AISuggestionResponse): AISuggestionItem => ({
+    id: r.id,
+    suggestionType: r.suggestion_type as AISuggestionItem['suggestionType'],
+    sourceContextLabel: `${r.source_context_type} ${r.source_context_id.slice(0, 8)}`,
+    content:
+      'text' in r.content && typeof (r.content as { text?: unknown }).text === 'string'
+        ? (r.content as { text: string }).text
+        : JSON.stringify(r.content),
+    // Same Decimal-as-string/0-1-scale pattern as Issue.confidence (see the bug-fix
+    // comment on that field above) — scaled to a percentage since AIInsightsView
+    // renders it as `${confidence}%` directly, matching its existing mock data shape.
+    confidence: r.confidence !== null ? Math.round(Number(r.confidence) * 100) : null,
+    provider: r.provider,
+    model: r.model,
+    status: r.status as AISuggestionItem['status'],
+    createdAt: r.created_at,
+  });
+
+  const pollAIJob = async (jobId: string): Promise<Record<string, unknown>> => {
+    const start = Date.now();
+    for (;;) {
+      const job: JobResponse = await apiGetJob(jobId);
+      if (job.status === 'COMPLETED') return job.result ?? {};
+      if (job.status === 'FAILED') throw new Error(job.error_message || 'AI generation failed');
+      if (job.status === 'CANCELLED') throw new Error('AI generation was cancelled');
+      if (Date.now() - start > 90_000) throw new Error('Timed out waiting for AI generation to complete');
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  };
+
+  const handleGenerateExplanation = async (issueId: string) => {
+    setAiGeneratingType('EXPLANATION');
+    setAiInsightsError(null);
+    try {
+      const result = await generateExplanation({ issue_id: issueId });
+      setAiSuggestions((prev) => [mapAISuggestion(result), ...prev]);
+      triggerToast('AI explanation generated');
+    } catch (err) {
+      setAiInsightsError(extractErrorMessage(err));
+    } finally {
+      setAiGeneratingType(null);
+    }
+  };
+
+  const handleGenerateRunSummary = async (validationRunId: string) => {
+    setAiGeneratingType('RUN_SUMMARY');
+    setAiInsightsError(null);
+    try {
+      const { job_id } = await triggerRunSummary({ validation_run_id: validationRunId });
+      const result = await pollAIJob(job_id);
+      const suggestion = await getAISuggestion(String(result.ai_suggestion_id));
+      setAiSuggestions((prev) => [mapAISuggestion(suggestion), ...prev]);
+      triggerToast('AI run summary generated');
+    } catch (err) {
+      setAiInsightsError(extractErrorMessage(err));
+    } finally {
+      setAiGeneratingType(null);
+    }
+  };
+
+  const handleGeneratePrioritization = async (reviewRunId: string) => {
+    setAiGeneratingType('PRIORITIZATION');
+    setAiInsightsError(null);
+    try {
+      const { job_id } = await triggerPrioritization({ review_run_id: reviewRunId });
+      const result = await pollAIJob(job_id);
+      const suggestion = await getAISuggestion(String(result.ai_suggestion_id));
+      setAiSuggestions((prev) => [mapAISuggestion(suggestion), ...prev]);
+      triggerToast('AI prioritization generated');
+    } catch (err) {
+      setAiInsightsError(extractErrorMessage(err));
+    } finally {
+      setAiGeneratingType(null);
+    }
+  };
+
+  const handleGenerateCluster = async (reviewRunId: string) => {
+    setAiGeneratingType('CLUSTER');
+    setAiInsightsError(null);
+    try {
+      const { job_id } = await triggerCluster({ review_run_id: reviewRunId });
+      const result = await pollAIJob(job_id);
+      const suggestion = await getAISuggestion(String(result.ai_suggestion_id));
+      setAiSuggestions((prev) => [mapAISuggestion(suggestion), ...prev]);
+      triggerToast('AI cluster analysis generated');
+    } catch (err) {
+      setAiInsightsError(extractErrorMessage(err));
+    } finally {
+      setAiGeneratingType(null);
+    }
+  };
+
+  const handleGenerateCorrections = async (reviewRunId: string) => {
+    setAiGeneratingType('CORRECTION');
+    setAiInsightsError(null);
+    try {
+      const { job_id } = await triggerCorrections({ review_run_id: reviewRunId });
+      const result = await pollAIJob(job_id);
+      // Refresh this review's issues/suggestions in place (same shape as
+      // handleGenerateSuggestions above) so the new AI-sourced rows are visible
+      // immediately if the user is already viewing this review.
+      const [issuesList, suggestionsList] = await Promise.all([
+        listReviewIssues(reviewRunId),
+        listReviewSuggestions(reviewRunId),
+      ]);
+      const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
+      suggestionsList.forEach((s) => {
+        suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
+      });
+      setIssues((prev) => {
+        const untouched = prev.filter((i) => i.reviewRunId !== reviewRunId);
+        const byId = new Map(prev.map((i) => [i.id, i]));
+        const refreshed: Issue[] = issuesList.map((issue) => {
+          const existing = byId.get(issue.id);
+          const candidates = suggestionsByIssueId.get(issue.id) ?? [];
+          const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
+          return {
+            id: issue.id,
+            reviewRunId: issue.review_run_id,
+            recordRef: issue.record_ref,
+            columnName: existing?.columnName ?? (issue.column_id ? issue.column_id.slice(0, 8) : '—'),
+            severity: (issue.severity as Issue['severity']) || 'MEDIUM',
+            originalValue: issue.original_value ?? '',
+            suggestedValue: suggestion?.suggested_value ?? null,
+            suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+            confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
+            status: (issue.status as Issue['status']) || 'PENDING',
+            finalValue: existing?.finalValue ?? null,
+            ruleTriggered: existing?.ruleTriggered ?? '—',
+            suggestionId: suggestion?.id ?? null,
+          };
+        });
+        return [...untouched, ...refreshed];
+      });
+      const count = typeof result.count === 'number' ? result.count : 0;
+      triggerToast(`${count} AI correction suggestion${count === 1 ? '' : 's'} generated — view them in Review & Corrections`);
+    } catch (err) {
+      setAiInsightsError(extractErrorMessage(err));
+    } finally {
+      setAiGeneratingType(null);
     }
   };
 
@@ -2573,9 +2747,28 @@ export default function App() {
               />
             )}
 
-          {currentScreen === 'insights' && (
-            <AIInsightsView onNavigate={handleNavigate} suggestions={aiSuggestions} />
-          )}
+          {currentScreen === 'insights' &&
+            renderGated(
+              hasPermission('ai.suggest'),
+              'You need the ai.suggest permission to view AI Insights.',
+              false,
+              '',
+              null,
+              <AIInsightsView
+                onNavigate={handleNavigate}
+                suggestions={aiSuggestions}
+                validationRuns={validationRuns}
+                reviewRuns={reviewRuns}
+                issues={issues}
+                generatingType={aiGeneratingType}
+                error={aiInsightsError}
+                onGenerateExplanation={handleGenerateExplanation}
+                onGenerateRunSummary={handleGenerateRunSummary}
+                onGeneratePrioritization={handleGeneratePrioritization}
+                onGenerateCluster={handleGenerateCluster}
+                onGenerateCorrections={handleGenerateCorrections}
+              />
+            )}
 
           {currentScreen === 'user-management' &&
             renderGated(
@@ -3027,7 +3220,7 @@ export default function App() {
                 </h3>
                 <p className="text-[10px] text-primary font-semibold flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-primary" />
-                  Active Context: Customer Data
+                  AI-generated — informational only, not applied automatically
                 </p>
               </div>
             </div>
@@ -3039,8 +3232,29 @@ export default function App() {
             </button>
           </div>
 
+          {!hasPermission('ai.chat') ? (
+            <div className="flex-1 flex items-center justify-center p-6 bg-surface">
+              <div className="text-center max-w-xs">
+                <span className="material-symbols-outlined text-3xl text-outline">lock</span>
+                <p className="mt-2 text-xs font-semibold text-on-surface">
+                  AI Copilot unavailable
+                </p>
+                <p className="mt-1 text-[11px] text-outline leading-relaxed">
+                  Your account doesn't have the "ai.chat" permission needed to use the AI Copilot. Ask an administrator to grant it if you need access.
+                </p>
+              </div>
+            </div>
+          ) : (
+          <>
           {/* Messages */}
           <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-surface">
+            {copilotMessages.length === 0 && !isCopilotSending && (
+              <div className="h-full flex items-center justify-center text-center px-4">
+                <p className="text-xs text-outline leading-relaxed">
+                  Ask the AI Copilot about rules, datasets, or validation results. Responses are AI-generated suggestions — always verify before acting on them.
+                </p>
+              </div>
+            )}
             {copilotMessages.map((m) => (
               <div
                 key={m.id}
@@ -3055,6 +3269,11 @@ export default function App() {
                       : 'bg-white border border-outline-variant text-on-surface shadow-xs rounded-bl-xs'
                   }`}
                 >
+                  {m.role !== 'user' && (
+                    <p className="text-[9px] font-bold uppercase tracking-wide text-primary mb-1">
+                      AI-generated
+                    </p>
+                  )}
                   <p className="whitespace-pre-wrap">{m.text}</p>
                 </div>
                 <span className="text-[10px] text-outline mt-1 px-1">
@@ -3062,7 +3281,24 @@ export default function App() {
                 </span>
               </div>
             ))}
+            {isCopilotSending && (
+              <div className="flex flex-col items-start">
+                <div className="p-3.5 rounded-lg max-w-[85%] text-xs leading-relaxed bg-white border border-outline-variant text-on-surface shadow-xs rounded-bl-xs">
+                  <span className="inline-flex items-center gap-1 text-outline">
+                    <span className="w-1.5 h-1.5 rounded-full bg-outline animate-pulse" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-outline animate-pulse [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-outline animate-pulse [animation-delay:300ms]" />
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
+
+          {copilotError && (
+            <div className="px-4 py-2 bg-error-container border-t border-outline-variant">
+              <p className="text-[11px] text-on-error-container">{copilotError}</p>
+            </div>
+          )}
 
           {/* Quick Suggestions */}
           <div className="px-4 py-2 bg-white border-t border-surface-container flex gap-1.5 overflow-x-auto">
@@ -3084,15 +3320,19 @@ export default function App() {
               value={copilotInput}
               onChange={(e) => setCopilotInput(e.target.value)}
               placeholder="Ask Copilot about rules, datasets..."
-              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary"
+              disabled={isCopilotSending}
+              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary disabled:opacity-60"
             />
             <button
               type="submit"
+              disabled={isCopilotSending || !copilotInput.trim()}
               className="p-2 bg-primary hover:bg-primary-container text-white rounded-md transition-colors cursor-pointer flex items-center justify-center shadow-2xs"
             >
               <span className="material-symbols-outlined text-base">send</span>
             </button>
           </form>
+          </>
+          )}
         </div>
       )}
 

@@ -679,6 +679,11 @@ export interface JobResponse {
   status: string;
   progress_percentage: number | null;
   error_message: string | null;
+  // BUG FIX (backend migration 0019, added wiring AI suggestions): null for every
+  // job type except AI_SUGGESTION, which sets {ai_suggestion_id} or
+  // {ai_suggestion_ids, count} on completion — the only way to resolve a completed
+  // async suggestion job back to its actual ai_suggestions row(s).
+  result: Record<string, unknown> | null;
   queued_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -1323,9 +1328,12 @@ export function listRoles(): Promise<RoleResponse[]> {
 }
 
 // --- AI --------------------------------------------------------------------
-// Types only, per this batch's scope — no request functions are exported for this
-// domain yet, and nothing calls these types. Do not wire any screen to AI endpoints
-// until a later, explicitly-scoped batch says to.
+// AI_ENABLED=true, real Anthropic key configured, all 6 prompt versions seeded.
+// ai.chat gates chat; ai.suggest gates every suggestion-generation/fetch endpoint
+// (confirmed via require_permission(...) in app/api/v1/ai/routes.py). There is
+// deliberately no ai.approve permission and no way for AI output to be
+// approved/finalized outside the existing human Review & Corrections / Approval
+// Center flow — every prompt template is instructed accordingly.
 
 export interface ChatMessageResponse {
   id: string;
@@ -1383,8 +1391,11 @@ export interface AISuggestionResponse {
   suggestion_type: string;
   source_context_type: string;
   source_context_id: string;
-  content: Record<string, unknown>;
-  confidence: number | null;
+  content: { text: string } | Record<string, unknown>;
+  // BUG FIX (Decimal-serialization sweep pattern): confidence is a backend
+  // Decimal, serialized as a JSON string — was typed `number`. Number() at the
+  // call site, same as every other Decimal field found in that earlier sweep.
+  confidence: string | null;
   provider: string;
   model: string;
   prompt_version_id: string;
@@ -1392,4 +1403,48 @@ export interface AISuggestionResponse {
   requested_by: string | null;
   status: string;
   created_at: string;
+}
+
+export function sendChatMessage(input: ChatRequest): Promise<ChatResponse> {
+  return apiRequest('/ai/chat', { method: 'POST', body: input });
+}
+
+export function getConversation(conversationId: string): Promise<ConversationDetailResponse> {
+  return apiRequest(`/ai/conversations/${conversationId}`);
+}
+
+// Synchronous — the response IS the result (app/api/v1/ai/routes.py:
+// generate_explanation calls the service inline, no job/poll).
+export function generateExplanation(input: ExplanationRequest): Promise<AISuggestionResponse> {
+  return apiRequest('/ai/suggestions/explanation', { method: 'POST', body: input });
+}
+
+// The remaining 4 trigger endpoints are all asynchronous: 202 + {job_id} only.
+// Poll getJob(job_id) until status is COMPLETED, then read job.result —
+// {ai_suggestion_id} for run-summary/prioritization/cluster, or
+// {ai_suggestion_ids, count} for corrections — and fetch the real suggestion(s)
+// via getAISuggestion(id) (see BUG FIX comment on JobResponse.result above).
+export function triggerRunSummary(input: RunSummaryRequest): Promise<AISuggestionTriggerResponse> {
+  return apiRequest('/ai/suggestions/run-summary', { method: 'POST', body: input });
+}
+
+export function triggerPrioritization(input: PrioritizationRequest): Promise<AISuggestionTriggerResponse> {
+  return apiRequest('/ai/suggestions/prioritization', { method: 'POST', body: input });
+}
+
+export function triggerCluster(input: ClusterRequest): Promise<AISuggestionTriggerResponse> {
+  return apiRequest('/ai/suggestions/cluster', { method: 'POST', body: input });
+}
+
+// Generates AI-sourced correction suggestions for every PENDING issue in the
+// review run that doesn't already have one — NOT per-issue. Results insert
+// directly into the existing correction_suggestions table (source="AI"), so they
+// appear automatically via the already-wired listReviewSuggestions() — no extra
+// fetch needed once the job completes.
+export function triggerCorrections(input: CorrectionSuggestionRequest): Promise<AISuggestionTriggerResponse> {
+  return apiRequest('/ai/suggestions/corrections', { method: 'POST', body: input });
+}
+
+export function getAISuggestion(suggestionId: string): Promise<AISuggestionResponse> {
+  return apiRequest(`/ai/suggestions/${suggestionId}`);
 }
