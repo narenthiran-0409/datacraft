@@ -26,6 +26,7 @@ import {
   logout as apiLogout,
   mapMeResponseToUser,
   onSessionExpired,
+  changePassword as apiChangePassword,
   ApiError,
   listDataSources,
   updateDataSource as apiUpdateDataSource,
@@ -351,6 +352,8 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<NavScreen>('dashboard');
   const [isMobileNavOpen, setIsMobileNavOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [changePasswordError, setChangePasswordError] = useState<string | null>(null);
 
   // Session bootstrap: try to silently resume a session from a stored refresh token
   // before ever showing the Login screen, so a page reload doesn't force a fresh login.
@@ -402,6 +405,45 @@ export default function App() {
   // shown as a persistent, explicitly-dismissed banner rather than an auto-dismissing
   // toast, since the admin needs time to actually copy and relay it.
   const [createdUserCredential, setCreatedUserCredential] = useState<{ email: string; temporaryPassword: string } | null>(null);
+
+  // Resolves the real logged-in user's own role name(s) for the profile dropdown
+  // (TopAppBar) — root cause of the "No role assigned" bug: mapMeResponseToUser
+  // always sets roleNames: [] on login (see its own BUG FIX comment — /auth/me has
+  // no role_ids, only permissions), and nothing merged the real names back in
+  // unless the user happened to already visit Settings/User Management first
+  // (which independently resolve it via this same listUsers()+listRoles() call,
+  // per the comment above). Runs once per login for any user with users.read —
+  // reuses/primes the same platformUsers/roles state those screens use, so
+  // visiting them afterward doesn't refetch. Skipped if platformUsers is already
+  // populated (already resolved, no need to redo it).
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!hasPermission('users.read')) return;
+    if (platformUsers.length > 0) return;
+
+    let cancelled = false;
+    Promise.all([listUsers(), listRoles()])
+      .then(([users, rolesList]) => {
+        if (cancelled) return;
+        setRoles(rolesList);
+        const roleById = new Map(rolesList.map((r) => [r.id, r]));
+        const mappedUsers = users.map((u) => mapUserResponseToUser(u, roleById));
+        setPlatformUsers(mappedUsers);
+        const self = mappedUsers.find((u) => u.id === currentUser.id);
+        if (self && self.roleNames.length > 0) {
+          setCurrentUser((prev) => (prev ? { ...prev, roleNames: self.roleNames } : prev));
+        }
+      })
+      .catch(() => {
+        // Silent — background enrichment for a dropdown label, not a screen load;
+        // the dropdown already has an honest fallback (see TopAppBar) if this
+        // never resolves.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, platformUsers.length]);
 
   // --- Real-data screens (this batch) -----------------------------------------
 
@@ -1720,6 +1762,30 @@ export default function App() {
     triggerToast(`Data source "${newSource.name}" successfully registered`);
   };
 
+  // Self-service password change (profile dropdown). POST /auth/change-password
+  // revokes every refresh token for this user on success (confirmed via
+  // AuthService.change_password) — the current session's stored refresh token is
+  // invalid the instant this succeeds, so a real logout is forced immediately
+  // afterward rather than letting the UI keep pretending the session is live.
+  const handleChangePassword = async (currentPassword: string, newPassword: string): Promise<boolean> => {
+    setIsChangingPassword(true);
+    setChangePasswordError(null);
+    try {
+      await apiChangePassword({ current_password: currentPassword, new_password: newPassword });
+      apiLogout().finally(() => {
+        setCurrentUser(null);
+        setCurrentScreen('login');
+        triggerToast('Password changed — please sign in again with your new password.');
+      });
+      return true;
+    } catch (err) {
+      setChangePasswordError(extractErrorMessage(err));
+      return false;
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
   // PUT /data-sources/{id} only accepts description/owner_team/business_domain —
   // name is not editable (confirmed via DataSourceUpdateRequest in schemas.py). No
   // optimistic update: dataSources is only touched after the real response succeeds.
@@ -2585,16 +2651,17 @@ export default function App() {
         {/* Top App Bar */}
         <TopAppBar
           currentUser={currentUser}
-          onSwitchUser={(u) => {
-            setCurrentUser(u);
-            triggerToast(`Switched user profile to ${u.name}`);
-          }}
           onLogout={() => {
             apiLogout().finally(() => {
               setCurrentUser(null);
               setCurrentScreen('login');
             });
           }}
+          onOpenProfile={() => setCurrentScreen('settings')}
+          canSeeOwnRole={hasPermission('users.read')}
+          onChangePassword={handleChangePassword}
+          isChangingPassword={isChangingPassword}
+          changePasswordError={changePasswordError}
           currentScreen={currentScreen}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}

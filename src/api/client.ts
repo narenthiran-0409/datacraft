@@ -179,6 +179,25 @@ export function fetchCurrentUser(): Promise<MeResponse> {
   return apiRequest<MeResponse>('/auth/me');
 }
 
+export interface ChangePasswordRequest {
+  current_password: string;
+  new_password: string;
+}
+
+/**
+ * Self-service — any authenticated user can change their OWN password given
+ * their current one. Distinct from the admin-only PUT /users/{id}/reset-password
+ * (gated users.manage, generates a random temp password for someone else) — no
+ * self-service "forgot password" flow exists; you must know your current
+ * password. 204 No Content on success. Confirmed via AuthService.change_password:
+ * a successful call revokes every refresh token this user has (all sessions),
+ * so the caller must treat success as an implicit session end and force a fresh
+ * login, not continue as if the current session is still valid.
+ */
+export function changePassword(input: ChangePasswordRequest): Promise<void> {
+  return apiRequest('/auth/change-password', { method: 'POST', body: input });
+}
+
 export async function logout(): Promise<void> {
   try {
     const refreshToken = getStoredRefreshToken();

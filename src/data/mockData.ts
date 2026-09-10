@@ -1,5 +1,4 @@
 import {
-  User,
   DataSource,
   QualityRule,
   DataRow,
@@ -26,51 +25,6 @@ import {
   AISuggestionItem,
   AppSettings,
 } from '../types';
-
-export const CURRENT_USER: User = {
-  id: 'usr-1',
-  name: 'Alex M.',
-  email: 'alex.m@datacraft.ai',
-  avatarUrl:
-    'https://lh3.googleusercontent.com/aida-public/AB6AXuD4wUgIvDtVnvlmU3XfSqiYCztRr_UGK9NGXsSxu_wJe2o7aFzJeUvCYJmWsb89gqXcr45RLef10kK8Z1tu5_A-GkqmDOBaXZYeVfaUWoVxXLN0CaWlEZ0DGqNBLSQx7goe9SdN6iQ5N8pksdT2vj5EP7G3NE-nKIjon65P7ALmDrrtQfskTay3AtRAPj6P2rek5rhTsDyg1FRiGi8AOBqBqlmfjXphfKyeiNUd9ZrqBcC3z2dDywmX',
-  roleNames: ['administrator'],
-  accountStatus: 'active',
-  permissions: [],
-};
-
-export const TEAM_MEMBERS: User[] = [
-  CURRENT_USER,
-  {
-    id: 'usr-2',
-    name: 'Sarah Jenkins',
-    email: 'sarah.jenkins@techflow.io',
-    avatarUrl:
-      'https://lh3.googleusercontent.com/aida-public/AB6AXuBrPXancUgBCxqERGnsKsR0_R2_Wnzq4VNFXYTfwfNDMRad3I4y_oSIV6K36RhH6fQpu6Cw808trk9O-s9RTU69WTqyIqh_yGSM7nX2O1p8R6-5H--jAQSYLL085Wb8uC1hVSOw-nFQlH1zuw-__gamdSei43DfNnKp4NY4j0_qrHLDtaOrWQetmxrG50rAFfT0aUafbQ0v2c7hMTg93jdwn095cKfDgI7zBaz3VPg-88yXg5JIaMsM',
-    roleNames: ['approver'],
-    accountStatus: 'active',
-    permissions: [],
-  },
-  {
-    id: 'usr-3',
-    name: 'Mike T.',
-    email: 'mike.turner@techflow.io',
-    avatarUrl:
-      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-    roleNames: ['analyst'],
-    accountStatus: 'active',
-    permissions: [],
-  },
-  {
-    id: 'usr-4',
-    name: 'Marcus Thorne',
-    email: 'marcus.t@logistics.co.uk',
-    avatarUrl:
-      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-    roleNames: ['publisher'],
-    accountStatus: 'invited',
-    permissions: [],
-  },
-];
 
 export const INITIAL_DATA_SOURCES: DataSource[] = [
   {

@@ -1,11 +1,19 @@
 import React, { useState } from 'react';
 import { User, NavScreen } from '../../types';
-import { TEAM_MEMBERS } from '../../data/mockData';
 
 interface TopAppBarProps {
   currentUser: User;
-  onSwitchUser: (user: User) => void;
   onLogout: () => void;
+  onOpenProfile: () => void;
+  // Whether this user's own role name(s) can be resolved at all — GET /users,
+  // GET /users/{id}, and GET /roles are all gated on users.read with no
+  // self-service exception, so a user without it has no endpoint that can tell
+  // them their own role name. Distinguishes "confirmed no roles" from "can't
+  // tell" rather than showing the same "No role assigned" label for both.
+  canSeeOwnRole: boolean;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<boolean>;
+  isChangingPassword: boolean;
+  changePasswordError: string | null;
   currentScreen: NavScreen;
   searchQuery: string;
   onSearchChange: (q: string) => void;
@@ -15,8 +23,12 @@ interface TopAppBarProps {
 
 export const TopAppBar: React.FC<TopAppBarProps> = ({
   currentUser,
-  onSwitchUser,
   onLogout,
+  onOpenProfile,
+  canSeeOwnRole,
+  onChangePassword,
+  isChangingPassword,
+  changePasswordError,
   currentScreen,
   searchQuery,
   onSearchChange,
@@ -25,6 +37,30 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
 }) => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [confirmMismatch, setConfirmMismatch] = useState(false);
+
+  const closeChangePasswordModal = () => {
+    setShowChangePassword(false);
+    setCurrentPasswordInput('');
+    setNewPasswordInput('');
+    setConfirmPasswordInput('');
+    setConfirmMismatch(false);
+  };
+
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPasswordInput !== confirmPasswordInput) {
+      setConfirmMismatch(true);
+      return;
+    }
+    setConfirmMismatch(false);
+    const ok = await onChangePassword(currentPasswordInput, newPasswordInput);
+    if (ok) closeChangePasswordModal();
+  };
 
   const notifications = [
     {
@@ -244,41 +280,39 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                   {currentUser.email}
                 </p>
                 <span className="inline-block mt-1 text-[10px] font-medium bg-surface-container-low text-primary px-2 py-0.5 rounded-md border border-outline-variant">
-                  {currentUser.roleNames.length > 0 ? currentUser.roleNames.join(', ') : 'No role assigned'}
+                  {currentUser.roleNames.length > 0
+                    ? currentUser.roleNames.join(', ')
+                    : canSeeOwnRole
+                    ? 'No role assigned'
+                    : 'Role info unavailable'}
                 </span>
               </div>
 
               <div className="px-2 py-2">
-                <p className="px-2 py-1 text-[10px] font-semibold text-outline uppercase tracking-wider">
-                  Switch User (Demo)
-                </p>
-                {TEAM_MEMBERS.map((member) => (
-                  <button
-                    key={member.id}
-                    onClick={() => {
-                      onSwitchUser(member);
-                      setShowUserMenu(false);
-                    }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left text-xs transition-colors cursor-pointer ${
-                      member.id === currentUser.id
-                        ? 'bg-surface-container text-on-surface font-bold'
-                        : 'text-on-surface-variant hover:bg-surface-container-low'
-                    }`}
-                  >
-                    <img
-                      src={member.avatarUrl}
-                      alt={member.name}
-                      className="w-6 h-6 rounded-full object-cover"
-                      referrerPolicy="no-referrer"
-                    />
-                    <div className="flex-1 truncate">
-                      <div>{member.name}</div>
-                      <div className="text-[10px] text-outline">
-                        {member.roleNames.length > 0 ? member.roleNames.join(', ') : 'No role assigned'}
-                      </div>
-                    </div>
-                  </button>
-                ))}
+                <button
+                  onClick={() => {
+                    onOpenProfile();
+                    setShowUserMenu(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">
+                    person
+                  </span>
+                  Profile
+                </button>
+                <button
+                  onClick={() => {
+                    setShowChangePassword(true);
+                    setShowUserMenu(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-left text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">
+                    lock_reset
+                  </span>
+                  Change Password
+                </button>
               </div>
 
               <div className="border-t border-surface-container pt-2 px-2">
@@ -292,13 +326,109 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
                   <span className="material-symbols-outlined text-base">
                     logout
                   </span>
-                  Sign Out to Login Screen
+                  Logout
                 </button>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Change Password Modal */}
+      {showChangePassword && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-sm w-full p-6 space-y-5 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-surface-container pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-md bg-surface-container-high text-primary flex items-center justify-center">
+                  <span className="material-symbols-outlined text-2xl">lock_reset</span>
+                </div>
+                <div>
+                  <h3 className="font-editorial text-xl font-bold text-on-surface">Change Password</h3>
+                  <p className="text-xs text-outline">You'll need to sign in again after this.</p>
+                </div>
+              </div>
+              <button
+                onClick={closeChangePasswordModal}
+                className="p-1 text-outline hover:text-on-surface rounded transition-colors cursor-pointer"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleChangePasswordSubmit} className="space-y-4">
+              {changePasswordError && (
+                <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                  <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                  <span className="font-medium leading-relaxed">{changePasswordError}</span>
+                </div>
+              )}
+              {confirmMismatch && (
+                <div className="p-3.5 rounded-md flex items-start gap-2.5 text-xs bg-error-container text-on-error-container">
+                  <span className="material-symbols-outlined text-lg mt-0.5">error</span>
+                  <span className="font-medium leading-relaxed">New password and confirmation don't match.</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Current Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={currentPasswordInput}
+                  onChange={(e) => setCurrentPasswordInput(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  New Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={newPasswordInput}
+                  onChange={(e) => setNewPasswordInput(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
+                  Confirm New Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={confirmPasswordInput}
+                  onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2.5 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-surface-container flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={closeChangePasswordModal}
+                  className="px-4 py-2.5 rounded-md border border-outline-variant text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isChangingPassword}
+                  className="px-5 py-2.5 rounded-md bg-primary hover:bg-primary-container text-white text-xs font-semibold transition-colors cursor-pointer shadow-ambient disabled:opacity-50"
+                >
+                  {isChangingPassword ? 'Changing…' : 'Change Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </header>
   );
 };
