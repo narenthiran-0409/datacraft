@@ -83,6 +83,9 @@ import {
   listRuleAssignments,
   createRuleAssignment as apiCreateRuleAssignment,
   deleteRuleAssignment as apiDeleteRuleAssignment,
+  promoteRule as apiPromoteRule,
+  dismissRule as apiDismissRule,
+  triggerRuleDetection,
   RuleResponse,
   RuleVersionResponse,
   RuleAssignmentResponse,
@@ -563,6 +566,12 @@ export default function App() {
   const [rulesActionError, setRulesActionError] = useState<string | null>(null);
   const [isSavingRule, setIsSavingRule] = useState(false);
   const [isSavingAssignment, setIsSavingAssignment] = useState(false);
+  // Whole-dataset rule detection + review workflow (this task)
+  const [isDetectingRules, setIsDetectingRules] = useState(false);
+  const [ruleDetectionError, setRuleDetectionError] = useState<string | null>(null);
+  const [ruleDetectionSummary, setRuleDetectionSummary] = useState<string | null>(null);
+  const [ruleReviewActionPendingId, setRuleReviewActionPendingId] = useState<string | null>(null);
+  const [ruleReviewActionError, setRuleReviewActionError] = useState<string | null>(null);
 
   // Validation Workspace — uses selectedDatasetId (shared with Data Explorer/Lineage).
   const [validationRuns, setValidationRuns] = useState<ValidationRun[]>([]);
@@ -1351,45 +1360,42 @@ export default function App() {
   // --- Core decision workflow fetches (this batch) ----------------------------------
 
   // Data Quality Rules: list rules + assignments, then each rule's versions (needed to
-  // find the current version id for creating new assignments). Also fetched when
-  // landing on Dataset Overview (this task) — its Quality Rules tab filters this
-  // exact same state down to the current dataset's assignments rather than
-  // duplicating a parallel fetch (resolving an assignment's rule name needs the
-  // same rule->versions map either way, so there's no cheaper alternative fetch).
-  useEffect(() => {
-    if (currentScreen !== 'quality-rules' && currentScreen !== 'dataset-overview') return;
-    if (!hasPermission('rules.read')) return;
-
-    let cancelled = false;
+  // find the current version id for creating new assignments, and — this task — to
+  // read a PENDING_REVIEW rule's _detected_for.column_id/column_name/dataset_id out
+  // of its current version's definition, the only place that's stored). Extracted
+  // into a standalone function (not just inline in the effect) so rule detection's
+  // completion handler can call it again to pick up newly-created PENDING_REVIEW
+  // rules, and so promote/dismiss can refresh real status without a full reload.
+  const refreshRulesAndAssignments = async (): Promise<void> => {
     setRulesLoading(true);
     setRulesError(null);
-
-    (async () => {
+    try {
       const [rulesList, assignments] = await Promise.all([listRules(), listRuleAssignments()]);
-      if (cancelled) return;
       setRules(rulesList);
       setRuleAssignments(assignments);
 
       const versionLists = await Promise.all(
         rulesList.map((r) => listRuleVersions(r.id).catch(() => [] as RuleVersionResponse[]))
       );
-      if (cancelled) return;
       const map: Record<string, RuleVersionResponse[]> = {};
       rulesList.forEach((r, idx) => {
         map[r.id] = versionLists[idx];
       });
       setRuleVersionsByRuleId(map);
-    })()
-      .catch((err) => {
-        if (!cancelled) setRulesError(extractErrorMessage(err));
-      })
-      .finally(() => {
-        if (!cancelled) setRulesLoading(false);
-      });
+    } catch (err) {
+      setRulesError(extractErrorMessage(err));
+    } finally {
+      setRulesLoading(false);
+    }
+  };
 
-    return () => {
-      cancelled = true;
-    };
+  // Also fetched when landing on Dataset Overview (this task) — its Quality Rules
+  // tab filters this exact same state down to the current dataset's assignments and
+  // PENDING_REVIEW rules, rather than duplicating a parallel fetch.
+  useEffect(() => {
+    if (currentScreen !== 'quality-rules' && currentScreen !== 'dataset-overview') return;
+    if (!hasPermission('rules.read')) return;
+    refreshRulesAndAssignments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScreen]);
 
@@ -1835,6 +1841,76 @@ export default function App() {
       triggerToast('Assignment disabled');
     } catch (err) {
       setRulesActionError(extractErrorMessage(err));
+    }
+  };
+
+  // Whole-dataset rule detection (this task) — POST /ai/suggestions/rule-detection
+  // is async (202+job_id), same pattern as the other AI suggestion triggers. Real
+  // LLM call for whatever the pattern-matching half wasn't confident about, so this
+  // genuinely isn't instant. No safety logic added here by design: the backend
+  // structurally guarantees every rule this produces lands PENDING_REVIEW with no
+  // rule_assignment, so nothing it creates can affect a validation run before a
+  // human explicitly promotes it — the frontend's job is only to trigger it, wait
+  // for the real result, and show it honestly (including when the AI half declined
+  // or was unavailable, via ai_skipped_reason).
+  const handleDetectRules = async (datasetId: string) => {
+    setIsDetectingRules(true);
+    setRuleDetectionError(null);
+    setRuleDetectionSummary(null);
+    try {
+      const { job_id } = await triggerRuleDetection({ dataset_id: datasetId });
+      const result = await pollAIJob(job_id);
+      const patternCount = typeof result.pattern_detected_count === 'number' ? result.pattern_detected_count : 0;
+      const aiCount = typeof result.ai_recommended_count === 'number' ? result.ai_recommended_count : 0;
+      const skippedReason = typeof result.ai_skipped_reason === 'string' ? result.ai_skipped_reason : null;
+
+      await refreshRulesAndAssignments();
+
+      if (patternCount === 0 && aiCount === 0) {
+        setRuleDetectionSummary(
+          skippedReason
+            ? `No confident pattern matches found, and the AI fallback didn't produce any either (${skippedReason}).`
+            : 'No confident pattern matches or AI recommendations were found for this dataset\'s columns.'
+        );
+      } else {
+        setRuleDetectionSummary(
+          `Found ${patternCount} pattern-detected and ${aiCount} AI-suggested rule${patternCount + aiCount === 1 ? '' : 's'} — review them below.` +
+            (skippedReason ? ` (Some columns skipped the AI fallback: ${skippedReason})` : '')
+        );
+      }
+      triggerToast('Rule detection finished');
+    } catch (err) {
+      setRuleDetectionError(extractErrorMessage(err));
+    } finally {
+      setIsDetectingRules(false);
+    }
+  };
+
+  const handlePromoteRule = async (ruleId: string) => {
+    setRuleReviewActionPendingId(ruleId);
+    setRuleReviewActionError(null);
+    try {
+      const updated = await apiPromoteRule(ruleId);
+      setRules((prev) => prev.map((r) => (r.id === ruleId ? updated : r)));
+      triggerToast(`"${updated.name}" promoted to active`);
+    } catch (err) {
+      setRuleReviewActionError(extractErrorMessage(err));
+    } finally {
+      setRuleReviewActionPendingId(null);
+    }
+  };
+
+  const handleDismissRule = async (ruleId: string) => {
+    setRuleReviewActionPendingId(ruleId);
+    setRuleReviewActionError(null);
+    try {
+      const updated = await apiDismissRule(ruleId);
+      setRules((prev) => prev.map((r) => (r.id === ruleId ? updated : r)));
+      triggerToast(`"${updated.name}" dismissed`);
+    } catch (err) {
+      setRuleReviewActionError(extractErrorMessage(err));
+    } finally {
+      setRuleReviewActionPendingId(null);
     }
   };
 
@@ -2952,6 +3028,16 @@ export default function App() {
                     rules={rules}
                     ruleVersionsByRuleId={ruleVersionsByRuleId}
                     ruleAssignments={ruleAssignments.filter((a) => a.dataset_id === selectedDatasetId)}
+                    canSuggestRules={hasPermission('ai.suggest')}
+                    onDetectRules={() => selectedDatasetId && handleDetectRules(selectedDatasetId)}
+                    isDetectingRules={isDetectingRules}
+                    ruleDetectionError={ruleDetectionError}
+                    ruleDetectionSummary={ruleDetectionSummary}
+                    canManageRuleReview={hasPermission('rules.manage')}
+                    onPromoteRule={handlePromoteRule}
+                    onDismissRule={handleDismissRule}
+                    ruleReviewActionPendingId={ruleReviewActionPendingId}
+                    ruleReviewActionError={ruleReviewActionError}
                     canViewApprovals={hasPermission('approval.read')}
                     approvals={approvalQueue.filter((a) => a.datasetName === selectedDataset?.name)}
                   />

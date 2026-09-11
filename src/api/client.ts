@@ -881,6 +881,21 @@ export function updateRule(ruleId: string, input: RuleUpdateRequest): Promise<Ru
   return apiRequest(`/rules/${ruleId}`, { method: 'PATCH', body: input });
 }
 
+/**
+ * The only path a PENDING_REVIEW rule can become ACTIVE — always this
+ * explicit human action (rules.manage-gated), never automatic. Rejected
+ * (409) if the rule isn't currently PENDING_REVIEW.
+ */
+export function promoteRule(ruleId: string): Promise<RuleResponse> {
+  return apiRequest(`/rules/${ruleId}/promote`, { method: 'POST' });
+}
+
+/** Rejects a PENDING_REVIEW rule — sets it DISABLED, never deleted. Same
+ * PENDING_REVIEW precondition (409 otherwise) as promoteRule. */
+export function dismissRule(ruleId: string): Promise<RuleResponse> {
+  return apiRequest(`/rules/${ruleId}/dismiss`, { method: 'POST' });
+}
+
 export function createRuleVersion(ruleId: string, input: RuleVersionCreateRequest): Promise<RuleVersionResponse> {
   return apiRequest(`/rules/${ruleId}/versions`, { method: 'POST', body: input });
 }
@@ -1522,4 +1537,30 @@ export function triggerCorrections(input: CorrectionSuggestionRequest): Promise<
 
 export function getAISuggestion(suggestionId: string): Promise<AISuggestionResponse> {
   return apiRequest(`/ai/suggestions/${suggestionId}`);
+}
+
+export interface RuleDetectionRequest {
+  dataset_id: string;
+}
+
+/**
+ * Whole-dataset candidate-rule detection (async, same 202+job_id pattern as
+ * the other four trigger* functions above) — a pattern-matching pass over
+ * every column, falling back to one batched LLM call for whatever it wasn't
+ * confident about. Every rule this produces lands with status="PENDING_REVIEW"
+ * and origin "PATTERN_DETECTED" or "AI_RECOMMENDED" — confirmed via
+ * RuleDetectionService/RulesService.create_rule that this is a structural
+ * guarantee (enforced regardless of caller), and that no rule_assignment is
+ * ever created for a detected rule, which is what actually keeps it inert
+ * until promoted (rules.status itself isn't checked by validation). Poll
+ * GET /jobs/{job_id}; its result is
+ * {pattern_detected_count, ai_recommended_count, pattern_detected_rule_ids,
+ * ai_recommended_rule_ids, ai_fallback_columns_considered,
+ * ai_fallback_columns_capped, ai_skipped_reason}. ai_skipped_reason is set
+ * (pattern-matched rules, if any, are kept) rather than the job failing when
+ * the AI fallback is unavailable/disabled — a real, honest partial result,
+ * not a generic failure.
+ */
+export function triggerRuleDetection(input: RuleDetectionRequest): Promise<AISuggestionTriggerResponse> {
+  return apiRequest('/ai/suggestions/rule-detection', { method: 'POST', body: input });
 }

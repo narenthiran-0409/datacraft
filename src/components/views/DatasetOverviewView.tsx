@@ -29,6 +29,17 @@ interface DatasetOverviewViewProps {
   rules: RuleResponse[];
   ruleVersionsByRuleId: Record<string, RuleVersionResponse[]>;
   ruleAssignments: RuleAssignmentResponse[]; // pre-filtered to this dataset by the caller
+  // Whole-dataset rule detection + review (this task)
+  canSuggestRules: boolean;
+  onDetectRules: () => void;
+  isDetectingRules: boolean;
+  ruleDetectionError: string | null;
+  ruleDetectionSummary: string | null;
+  canManageRuleReview: boolean;
+  onPromoteRule: (ruleId: string) => void;
+  onDismissRule: (ruleId: string) => void;
+  ruleReviewActionPendingId: string | null;
+  ruleReviewActionError: string | null;
   canViewApprovals: boolean;
   approvals: ApprovalRequestItem[]; // pre-filtered to this dataset by the caller
 }
@@ -61,6 +72,16 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   rules,
   ruleVersionsByRuleId,
   ruleAssignments,
+  canSuggestRules,
+  onDetectRules,
+  isDetectingRules,
+  ruleDetectionError,
+  ruleDetectionSummary,
+  canManageRuleReview,
+  onPromoteRule,
+  onDismissRule,
+  ruleReviewActionPendingId,
+  ruleReviewActionError,
   canViewApprovals,
   approvals,
 }) => {
@@ -77,6 +98,22 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   rules.forEach((rule) => {
     (ruleVersionsByRuleId[rule.id] ?? []).forEach((v) => ruleNameByVersionId.set(v.id, rule.name));
   });
+
+  // PENDING_REVIEW rules detected for THIS dataset specifically — the only place
+  // that association is recorded is inside each rule's current version's
+  // definition, under a _detected_for key written by RuleDetectionService
+  // (confirmed via source: rules carry no first-class dataset_id column, and no
+  // rule_assignment is ever created for a detected-but-not-yet-promoted rule).
+  const pendingReviewRules = rules
+    .filter((r) => r.status === 'PENDING_REVIEW')
+    .map((r) => {
+      const currentVersion = (ruleVersionsByRuleId[r.id] ?? []).find((v) => v.is_current);
+      const detectedFor = currentVersion?.definition?._detected_for as
+        | { dataset_id?: string; column_id?: string; column_name?: string; confidence?: number | null }
+        | undefined;
+      return { rule: r, detectedFor };
+    })
+    .filter(({ detectedFor }) => detectedFor?.dataset_id === dataset.id);
 
   return (
     <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -217,6 +254,14 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
                   {ruleAssignments.length}
                 </span>
               )}
+              {canViewRules && pendingReviewRules.length > 0 && (
+                <span
+                  className="bg-secondary text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full"
+                  title="Rules awaiting review"
+                >
+                  {pendingReviewRules.length} pending
+                </span>
+              )}
               {activeTab === 'rules' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
 
@@ -260,53 +305,183 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
           </div>
         </div>
       ) : activeTab === 'rules' ? (
-        /* Quality Rules — real assignments for this dataset (this task). Replaces
-           the old "Quality Rules (6)" nav-away link with an in-page, real, scoped
-           list; "View All Rules" still goes to the full Quality Rules screen. */
-        <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="font-editorial text-xl font-bold text-on-surface">Assigned Quality Rules</h3>
-              <p className="text-xs text-outline">Rules currently evaluated against this dataset</p>
-            </div>
-            <button
-              onClick={() => onNavigate('quality-rules')}
-              className="text-xs font-bold text-primary hover:underline cursor-pointer"
-            >
-              View All Rules &rarr;
-            </button>
-          </div>
-          {!canViewRules ? (
-            <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 flex items-center gap-2 text-xs text-on-surface-variant">
-              <span className="material-symbols-outlined text-base text-outline">lock</span>
-              You need the rules.read permission to see rules assigned to this dataset.
-            </div>
-          ) : ruleAssignments.length === 0 ? (
-            <p className="text-xs text-outline italic py-4">No quality rules are assigned to this dataset yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {ruleAssignments.map((a) => (
-                <div
-                  key={a.id}
-                  className="flex items-center justify-between gap-3 p-3.5 bg-surface-container-low rounded-md border border-outline-variant"
-                >
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-on-surface truncate">
-                      {ruleNameByVersionId.get(a.rule_version_id) ?? 'Unknown rule'}
-                    </p>
-                    <p className="text-[11px] text-outline mt-0.5">Scope: {a.assignment_scope}</p>
-                  </div>
-                  <span
-                    className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
-                      a.is_enabled ? 'bg-primary-fixed text-on-primary-fixed' : 'bg-surface-container text-outline'
-                    }`}
-                  >
-                    {a.is_enabled ? 'Enabled' : 'Paused'}
-                  </span>
+        <div className="space-y-6">
+          {/* Suggest Rules — whole-dataset detection (this task). Real async
+              trigger (a real LLM call for the AI-fallback half, so genuinely not
+              instant); no safety logic added here — the backend structurally
+              guarantees every rule this produces lands PENDING_REVIEW with no
+              rule_assignment, so nothing it creates can affect a validation run
+              before a human explicitly promotes it below. */}
+          {canSuggestRules && !connectionInactive && (
+            <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <h3 className="font-editorial text-xl font-bold text-on-surface">Suggest Rules for This Dataset</h3>
+                  <p className="text-xs text-outline mt-1">
+                    Scans every column: a fast pattern-matching pass, falling back to one AI call for
+                    whatever it isn't confident about. Every result lands below for review — nothing is
+                    ever active automatically.
+                  </p>
                 </div>
-              ))}
+                <button
+                  onClick={onDetectRules}
+                  disabled={isDetectingRules}
+                  className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
+                >
+                  <span className={`material-symbols-outlined text-lg ${isDetectingRules ? 'animate-spin' : ''}`}>
+                    {isDetectingRules ? 'sync' : 'auto_awesome'}
+                  </span>
+                  <span>{isDetectingRules ? 'Scanning columns…' : 'Suggest Rules'}</span>
+                </button>
+              </div>
+
+              {ruleDetectionError && (
+                <div className="mt-4 p-3 bg-error-container border border-outline-variant text-on-error-container rounded-md text-xs">
+                  {ruleDetectionError}
+                </div>
+              )}
+              {ruleDetectionSummary && !ruleDetectionError && (
+                <div className="mt-4 p-3 bg-surface-container-high/60 border border-outline-variant text-on-surface rounded-md text-xs">
+                  {ruleDetectionSummary}
+                </div>
+              )}
             </div>
           )}
+
+          {/* Pending Review — real PENDING_REVIEW rules for this dataset (this
+              task). Origin labeled honestly and distinctly: a reviewer should be
+              able to tell "a regex matched" from "an LLM proposed this". */}
+          {canViewRules && pendingReviewRules.length > 0 && (
+            <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
+              <div className="mb-4">
+                <h3 className="font-editorial text-xl font-bold text-on-surface">Pending Review</h3>
+                <p className="text-xs text-outline">
+                  Detected candidate rules — inert until explicitly promoted; nothing here can affect a
+                  validation run on its own.
+                </p>
+              </div>
+              <div className="space-y-2">
+                {pendingReviewRules.map(({ rule, detectedFor }) => {
+                  const isPending = ruleReviewActionPendingId === rule.id;
+                  const isAiRecommended = rule.origin === 'AI_RECOMMENDED';
+                  return (
+                    <div
+                      key={rule.id}
+                      className="flex items-center justify-between gap-3 p-3.5 bg-surface-container-low rounded-md border border-outline-variant"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-xs font-bold text-on-surface truncate">{rule.name}</p>
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                              isAiRecommended
+                                ? 'bg-tertiary-fixed text-on-tertiary-fixed'
+                                : 'bg-surface-container-high text-primary'
+                            }`}
+                            title={
+                              isAiRecommended
+                                ? 'Proposed by the AI fallback, not a deterministic pattern match'
+                                : 'Matched by deterministic column-name/value/stat heuristics, no LLM involved'
+                            }
+                          >
+                            {isAiRecommended ? 'AI suggested' : 'Pattern detected'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-outline mt-0.5">
+                          {rule.rule_type}
+                          {detectedFor?.column_name ? ` on column "${detectedFor.column_name}"` : ''}
+                          {typeof detectedFor?.confidence === 'number'
+                            ? ` — ${Math.round(detectedFor.confidence * 100)}% confidence`
+                            : ''}
+                        </p>
+                        {rule.description && (
+                          <p className="text-[11px] text-on-surface-variant mt-1">{rule.description}</p>
+                        )}
+                      </div>
+                      {canManageRuleReview && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => onDismissRule(rule.id)}
+                            disabled={isPending}
+                            className="px-3 py-1.5 bg-white hover:bg-error-container text-on-surface-variant hover:text-on-error-container border border-outline-variant rounded text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Dismiss
+                          </button>
+                          <button
+                            onClick={() => onPromoteRule(rule.id)}
+                            disabled={isPending}
+                            className="px-3 py-1.5 bg-primary hover:bg-primary-container text-white rounded text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isPending ? 'Working…' : 'Promote'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {ruleReviewActionError && (
+                <div className="mt-4 p-3 bg-error-container border border-outline-variant text-on-error-container rounded-md text-xs">
+                  {ruleReviewActionError}
+                </div>
+              )}
+              {!canManageRuleReview && (
+                <div className="mt-4 bg-surface-container-low rounded-md border border-outline-variant p-3 flex items-center gap-2 text-xs text-on-surface-variant">
+                  <span className="material-symbols-outlined text-base text-outline">lock</span>
+                  You need the rules.manage permission to promote or dismiss these.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Quality Rules — real assignments for this dataset. Replaces the old
+              "Quality Rules (6)" nav-away link with an in-page, real, scoped list;
+              "View All Rules" still goes to the full Quality Rules screen. */}
+          <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-editorial text-xl font-bold text-on-surface">Assigned Quality Rules</h3>
+                <p className="text-xs text-outline">Rules currently evaluated against this dataset</p>
+              </div>
+              <button
+                onClick={() => onNavigate('quality-rules')}
+                className="text-xs font-bold text-primary hover:underline cursor-pointer"
+              >
+                View All Rules &rarr;
+              </button>
+            </div>
+            {!canViewRules ? (
+              <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 flex items-center gap-2 text-xs text-on-surface-variant">
+                <span className="material-symbols-outlined text-base text-outline">lock</span>
+                You need the rules.read permission to see rules assigned to this dataset.
+              </div>
+            ) : ruleAssignments.length === 0 ? (
+              <p className="text-xs text-outline italic py-4">No quality rules are assigned to this dataset yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {ruleAssignments.map((a) => (
+                  <div
+                    key={a.id}
+                    className="flex items-center justify-between gap-3 p-3.5 bg-surface-container-low rounded-md border border-outline-variant"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-on-surface truncate">
+                        {ruleNameByVersionId.get(a.rule_version_id) ?? 'Unknown rule'}
+                      </p>
+                      <p className="text-[11px] text-outline mt-0.5">Scope: {a.assignment_scope}</p>
+                    </div>
+                    <span
+                      className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                        a.is_enabled ? 'bg-primary-fixed text-on-primary-fixed' : 'bg-surface-container text-outline'
+                      }`}
+                    >
+                      {a.is_enabled ? 'Enabled' : 'Paused'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       ) : activeTab === 'approvals' ? (
         /* Pending Approvals — real approvals scoped to this dataset by name (this
