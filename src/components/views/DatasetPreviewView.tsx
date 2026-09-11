@@ -154,12 +154,17 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
 
           {/* Main Table Card */}
           <div className="bg-white rounded-lg border border-outline-variant shadow-ambient overflow-hidden">
-            <div className="overflow-x-auto">
+            {/* Fixed-height, scrollable in both directions — ~15 rows visible before
+                vertical scroll kicks in (15 rows * ~2.5rem row height + header), rather
+                than growing to fit however many rows/columns come back. The sticky
+                header is applied per-<th> (not on <thead> itself) for cross-browser
+                reliability inside a scrolling <table>. */}
+            <div className="overflow-auto max-h-[40rem]">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-surface-container-low border-b border-outline-variant text-on-surface-variant uppercase tracking-wider font-semibold">
                     {columns.map((col) => (
-                      <th key={col} className="py-3.5 px-5 font-mono">
+                      <th key={col} className="sticky top-0 z-10 bg-surface-container-low py-3.5 px-5 font-mono">
                         {col}
                       </th>
                     ))}
