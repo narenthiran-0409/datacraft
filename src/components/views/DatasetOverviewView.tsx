@@ -1,20 +1,49 @@
 import React, { useState } from 'react';
-import { NavScreen, QualityMetric } from '../../types';
-import { DATASET_ISSUES, RECENT_ACTIVITIES } from '../../data/mockData';
-import { ColumnResponse, DatasetResponse } from '../../api/client';
+import { NavScreen, ValidationRun, ApprovalRequestItem } from '../../types';
+import {
+  ColumnResponse,
+  DatasetResponse,
+  ValidationFailureResponse,
+  RuleResponse,
+  RuleVersionResponse,
+  RuleAssignmentResponse,
+} from '../../api/client';
 
 interface DatasetOverviewViewProps {
   onNavigate: (screen: NavScreen) => void;
   onOpenEditSchema?: () => void;
   dataset: DatasetResponse;
   columns: ColumnResponse[];
-  // Additive (this task): derived client-side from schema.connection_id ->
-  // connection.is_active. Visual only — never blocks any action on this screen.
+  // Additive: derived client-side from schema.connection_id -> connection.is_active.
+  // Visual only — never blocks any action on this screen.
   connectionInactive?: boolean;
+  // Real data (this task) — see App.tsx's broadened validation-runs/rules/approvals
+  // fetch effects, which now also populate on this screen, not just their own.
+  validationRuns: ValidationRun[];
+  latestFailures: ValidationFailureResponse[];
+  onRunValidation: () => void;
+  canTriggerValidation: boolean;
+  isTriggeringValidation: boolean;
+  validationActionError: string | null;
+  canViewRules: boolean;
+  rules: RuleResponse[];
+  ruleVersionsByRuleId: Record<string, RuleVersionResponse[]>;
+  ruleAssignments: RuleAssignmentResponse[]; // pre-filtered to this dataset by the caller
+  canViewApprovals: boolean;
+  approvals: ApprovalRequestItem[]; // pre-filtered to this dataset by the caller
 }
 
 const formatDateTime = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
+
+const STATUS_STYLES: Record<string, string> = {
+  COMPLETED: 'bg-primary-fixed text-on-primary-fixed',
+  FAILED: 'bg-error-container text-on-error-container',
+  RUNNING: 'bg-secondary-fixed text-on-secondary-fixed',
+  QUEUED: 'bg-surface-container text-on-surface-variant',
+  CANCELLED: 'bg-surface-container text-outline',
+  CREATED: 'bg-surface-container text-outline',
+};
 
 export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   onNavigate,
@@ -22,47 +51,32 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   dataset,
   columns,
   connectionInactive = false,
+  validationRuns,
+  latestFailures,
+  onRunValidation,
+  canTriggerValidation,
+  isTriggeringValidation,
+  validationActionError,
+  canViewRules,
+  rules,
+  ruleVersionsByRuleId,
+  ruleAssignments,
+  canViewApprovals,
+  approvals,
 }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'preview' | 'rules' | 'lineage'>('overview');
-  const [isRunningCheck, setIsRunningCheck] = useState(false);
-  const [checkFinished, setCheckFinished] = useState(false);
+  const [activeTab, setActiveTab] = useState<'overview' | 'rules' | 'approvals'>('overview');
 
   const rowCount = dataset.row_count_estimate ?? 0;
   const columnCount = dataset.column_count ?? columns.length;
+  const latestCompletedRun = validationRuns.find((r) => r.status === 'COMPLETED') ?? null;
+  const hasActiveValidationRun = validationRuns.some((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
 
-  const metrics: QualityMetric[] = [
-    {
-      name: 'Completeness',
-      percentage: 98,
-      icon: 'check_circle',
-      status: 'healthy',
-      details: '45 null values in non-critical columns',
-    },
-    {
-      name: 'Uniqueness',
-      percentage: 100,
-      icon: 'check_circle',
-      status: 'healthy',
-      details: '0 duplicate primary keys found',
-    },
-    {
-      name: 'Accuracy',
-      percentage: 85,
-      icon: 'warning',
-      status: 'warning',
-      details: '14 format anomalies flagged by AI check',
-    },
-  ];
-
-  const handleRunCheck = () => {
-    setIsRunningCheck(true);
-    setCheckFinished(false);
-    setTimeout(() => {
-      setIsRunningCheck(false);
-      setCheckFinished(true);
-      setTimeout(() => setCheckFinished(false), 4000);
-    }, 1500);
-  };
+  // Resolves an assignment's rule name the same way QualityRulesView does: match
+  // the assignment's rule_version_id against each rule's known set of version ids.
+  const ruleNameByVersionId = new Map<string, string>();
+  rules.forEach((rule) => {
+    (ruleVersionsByRuleId[rule.id] ?? []).forEach((v) => ruleNameByVersionId.set(v.id, rule.name));
+  });
 
   return (
     <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -86,7 +100,7 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
                 className="material-symbols-outlined text-3xl text-primary"
                 style={{ fontVariationSettings: "'FILL' 1" }}
               >
-                person_pin
+                table_chart
               </span>
             </div>
             <div>
@@ -139,61 +153,49 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
               <span>Edit Schema</span>
             </button>
 
-            {!connectionInactive && (
+            {/* BUG FIX (this task): used to be a fake setTimeout "scan" with a
+                fabricated completion banner. Now the exact same real trigger as
+                Validation Workspace's own "Run Validation" — same permission gate
+                (hidden, not just disabled, matching that screen's convention),
+                same in-flight guard. */}
+            {!connectionInactive && canTriggerValidation && (
               <button
-                onClick={handleRunCheck}
-                disabled={isRunningCheck}
-                className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] disabled:opacity-80 cursor-pointer"
+                onClick={onRunValidation}
+                disabled={hasActiveValidationRun || isTriggeringValidation}
+                title={hasActiveValidationRun ? 'A run is already queued or in progress for this dataset' : undefined}
+                className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 <span
                   className={`material-symbols-outlined text-lg ${
-                    isRunningCheck ? 'animate-spin' : ''
+                    isTriggeringValidation ? 'animate-spin' : ''
                   }`}
                 >
-                  {isRunningCheck ? 'sync' : 'play_circle'}
+                  {isTriggeringValidation ? 'sync' : 'play_circle'}
                 </span>
-                <span>{isRunningCheck ? `Scanning ~${rowCount.toLocaleString()} Rows...` : 'Run Data Check'}</span>
+                <span>{isTriggeringValidation ? 'Starting…' : 'Run Validation'}</span>
               </button>
             )}
           </div>
         </div>
 
-        {/* Live Validation Alert Notification */}
-        {checkFinished && !connectionInactive && (
-          <div className="mt-4 p-3 bg-surface-container-high/60 border border-outline-variant text-primary rounded-md text-xs flex items-center justify-between animate-in fade-in slide-in-from-top-2">
-            <div className="flex items-center gap-2 font-medium">
-              <span className="material-symbols-outlined text-base text-primary">
-                verified
-              </span>
-              <span>
-                Automated validation scan complete! 12,418 records analyzed across 6 active rules.
-              </span>
-            </div>
-            <span className="text-[11px] font-semibold underline cursor-pointer" onClick={() => onNavigate('review-corrections')}>
-              Inspect 14 Suggestions
-            </span>
+        {validationActionError && !connectionInactive && (
+          <div className="mt-4 p-3 bg-error-container border border-outline-variant text-on-error-container rounded-md text-xs">
+            {validationActionError}
           </div>
         )}
 
         {/* Sub-Navigation Tabs — hidden when the connection is inactive (see the
-            centered state card below instead): every tab here is either fully
-            mock content (Overview) or navigates to a screen scoped to this same
-            dataset, so none of it is meaningful while the underlying connection
-            is deactivated. */}
+            centered state card below instead). */}
         {!connectionInactive && (
           <div className="flex items-center gap-8 mt-8 border-b border-surface-container">
             <button
               onClick={() => setActiveTab('overview')}
               className={`pb-3 text-sm font-semibold transition-all relative cursor-pointer ${
-                activeTab === 'overview'
-                  ? 'text-primary'
-                  : 'text-outline hover:text-on-surface'
+                activeTab === 'overview' ? 'text-primary' : 'text-outline hover:text-on-surface'
               }`}
             >
               Overview
-              {activeTab === 'overview' && (
-                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />
-              )}
+              {activeTab === 'overview' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
 
             <button
@@ -204,37 +206,45 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
             </button>
 
             <button
-              onClick={() => onNavigate('quality-rules')}
-              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
+              onClick={() => setActiveTab('rules')}
+              className={`pb-3 text-sm font-semibold transition-all relative flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'rules' ? 'text-primary' : 'text-outline hover:text-on-surface'
+              }`}
             >
-              Quality Rules (6)
+              <span>Quality Rules</span>
+              {canViewRules && (
+                <span className="bg-surface-container-high text-on-surface-variant text-[10px] font-bold px-1.5 py-0.2 rounded-full">
+                  {ruleAssignments.length}
+                </span>
+              )}
+              {activeTab === 'rules' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
 
             <button
-              onClick={() => onNavigate('approval-center')}
-              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all flex items-center gap-1.5 cursor-pointer"
+              onClick={() => setActiveTab('approvals')}
+              className={`pb-3 text-sm font-semibold transition-all relative flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'approvals' ? 'text-primary' : 'text-outline hover:text-on-surface'
+              }`}
             >
               <span>Pending Approvals</span>
-              <span className="bg-secondary text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
-                1
-              </span>
+              {canViewApprovals && approvals.length > 0 && (
+                <span className="bg-secondary text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
+                  {approvals.filter((a) => a.status === 'PENDING').length}
+                </span>
+              )}
+              {activeTab === 'approvals' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
           </div>
         )}
       </div>
 
       {connectionInactive ? (
-        /* Connection Inactive — replaces the (mock) Overview content below rather
-           than showing fabricated metrics/issues/activity alongside a badge saying
-           the underlying connection is deactivated. */
         <div className="flex items-center justify-center py-20">
           <div className="max-w-md w-full bg-white rounded-lg border border-outline-variant shadow-ambient p-8 text-center">
             <div className="w-14 h-14 rounded-full bg-secondary-fixed text-on-secondary-fixed flex items-center justify-center mx-auto mb-4">
               <span className="material-symbols-outlined text-3xl">cable</span>
             </div>
-            <h3 className="font-editorial text-xl font-bold text-on-surface">
-              Connection Inactive
-            </h3>
+            <h3 className="font-editorial text-xl font-bold text-on-surface">Connection Inactive</h3>
             <p className="text-xs text-on-surface-variant leading-relaxed mt-2">
               The connection this dataset was discovered through has been deactivated, so
               overview metrics and previews aren't shown here. The dataset itself hasn't been
@@ -249,199 +259,300 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
             </button>
           </div>
         </div>
-      ) : (
-      <>
-      {/* Quality Highlights (3 Cards) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {metrics.map((m, idx) => (
-          <div
-            key={idx}
-            className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient"
-          >
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-outline">
-                {m.name}
-              </span>
-              <span
-                className={`p-2 rounded-md ${
-                  m.status === 'warning'
-                    ? 'bg-secondary-fixed text-on-secondary-fixed'
-                    : 'bg-primary-fixed text-on-primary-fixed'
-                }`}
-              >
-                <span className="material-symbols-outlined text-xl">
-                  {m.icon}
-                </span>
-              </span>
+      ) : activeTab === 'rules' ? (
+        /* Quality Rules — real assignments for this dataset (this task). Replaces
+           the old "Quality Rules (6)" nav-away link with an in-page, real, scoped
+           list; "View All Rules" still goes to the full Quality Rules screen. */
+        <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="font-editorial text-xl font-bold text-on-surface">Assigned Quality Rules</h3>
+              <p className="text-xs text-outline">Rules currently evaluated against this dataset</p>
             </div>
-
-            <div className="flex items-baseline gap-2">
-              <span
-                className={`font-editorial text-4xl font-extrabold ${
-                  m.status === 'warning' ? 'text-secondary' : 'text-primary'
-                }`}
-              >
-                {m.percentage}%
-              </span>
-              <span className="text-xs text-outline">of 12,418 rows</span>
-            </div>
-
-            <p className="text-xs text-outline mt-3 font-sans">{m.details}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* 2-Column: Important Issues + Data Distribution & Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left 2 Cols: Important Issues & Data Distribution */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* Important Issues */}
-          <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="font-editorial text-xl font-bold text-on-surface">
-                  Important Issues & Anomalies
-                </h3>
-                <p className="text-xs text-outline">
-                  Rules that flagged non-compliant values during recent evaluation
-                </p>
-              </div>
-              <button
-                onClick={() => onNavigate('review-corrections')}
-                className="text-xs font-bold text-primary hover:underline cursor-pointer"
-              >
-                Review All &rarr;
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {DATASET_ISSUES.map((issue) => (
-                <div
-                  key={issue.id}
-                  className="p-4 bg-surface-container-low rounded-md border border-outline-variant flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-primary transition-colors"
-                >
-                  <div className="flex items-start gap-3">
-                    <span
-                      className={`material-symbols-outlined text-xl mt-0.5 ${
-                        issue.severity === 'high'
-                          ? 'text-on-error-container'
-                          : issue.severity === 'medium'
-                          ? 'text-secondary'
-                          : 'text-tertiary'
-                      }`}
-                    >
-                      {issue.icon}
-                    </span>
-                    <div>
-                      <h4 className="text-xs font-bold text-on-surface">
-                        {issue.title}
-                      </h4>
-                      <p className="text-xs text-on-surface-variant mt-0.5 font-sans">
-                        {issue.description}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 self-end sm:self-auto shrink-0">
-                    <span className="text-xs font-bold text-on-error-container bg-error-container px-2 py-1 rounded border border-on-error-container/20">
-                      {issue.affectedCount} rows
-                    </span>
-                    <button
-                      onClick={() => onNavigate('review-corrections')}
-                      className="px-3 py-1.5 bg-white hover:bg-primary text-primary hover:text-white border border-outline-variant rounded text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
-                    >
-                      Fix
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Regional & Channel Distribution */}
-          <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
-            <h3 className="font-editorial text-xl font-bold text-on-surface mb-1">
-              Geographic Distribution of Records
-            </h3>
-            <p className="text-xs text-outline mb-5">
-              Breakdown of customer segments across global operational hubs
-            </p>
-
-            <div className="space-y-3.5">
-              {[
-                { region: 'North America (US/CA)', pct: 54, count: '6,705', color: 'bg-primary' },
-                { region: 'EMEA (UK/EU/IE)', pct: 28, count: '3,477', color: 'bg-primary-container' },
-                { region: 'APAC (AU/SG/JP)', pct: 13, count: '1,614', color: 'bg-tertiary' },
-                { region: 'LATAM (BR/MX)', pct: 5, count: '622', color: 'bg-secondary' },
-              ].map((item, idx) => (
-                <div key={idx}>
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="font-medium text-on-surface">{item.region}</span>
-                    <span className="text-outline">
-                      <strong className="text-on-surface">{item.count}</strong> ({item.pct}%)
-                    </span>
-                  </div>
-                  <div className="w-full bg-surface-container h-2.5 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full ${item.color} rounded-full transition-all duration-500`}
-                      style={{ width: `${item.pct}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Right 1 Col: Recent Activity & Schema Summary */}
-        <div className="space-y-6">
-          {/* Recent Activity Timeline */}
-          <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
-            <h3 className="font-editorial text-xl font-bold text-on-surface mb-4">
-              Recent Activity
-            </h3>
-
-            <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-surface-container">
-              {RECENT_ACTIVITIES.map((act) => (
-                <div key={act.id} className="relative">
-                  <span
-                    className={`absolute -left-[23px] top-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
-                      act.type === 'system'
-                        ? 'bg-primary'
-                        : act.type === 'approval'
-                        ? 'bg-secondary'
-                        : 'bg-tertiary'
-                    }`}
-                  />
-                  <p className="text-xs font-semibold text-on-surface leading-snug">
-                    {act.title}
-                  </p>
-                  <p className="text-[11px] text-outline mt-0.5">
-                    {act.timestamp} • {act.author}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Quick Actions Card */}
-          <div className="bg-surface-container-low rounded-lg p-6 border border-outline-variant">
-            <h4 className="font-editorial font-bold text-base text-on-surface mb-2">
-              Next Recommended Action
-            </h4>
-            <p className="text-xs text-on-surface-variant leading-relaxed mb-4 font-sans">
-              Clean 14 email records with double "@" syntax using AI Standardizer, then commit changes to PostgreSQL.
-            </p>
             <button
-              onClick={() => onNavigate('review-corrections')}
-              className="w-full py-2.5 bg-primary hover:bg-primary-container text-white rounded-md text-xs font-semibold transition-all shadow-ambient active:scale-[0.98] cursor-pointer"
+              onClick={() => onNavigate('quality-rules')}
+              className="text-xs font-bold text-primary hover:underline cursor-pointer"
             >
-              Start AI Cleaning (14 records)
+              View All Rules &rarr;
             </button>
           </div>
+          {!canViewRules ? (
+            <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 flex items-center gap-2 text-xs text-on-surface-variant">
+              <span className="material-symbols-outlined text-base text-outline">lock</span>
+              You need the rules.read permission to see rules assigned to this dataset.
+            </div>
+          ) : ruleAssignments.length === 0 ? (
+            <p className="text-xs text-outline italic py-4">No quality rules are assigned to this dataset yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {ruleAssignments.map((a) => (
+                <div
+                  key={a.id}
+                  className="flex items-center justify-between gap-3 p-3.5 bg-surface-container-low rounded-md border border-outline-variant"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-on-surface truncate">
+                      {ruleNameByVersionId.get(a.rule_version_id) ?? 'Unknown rule'}
+                    </p>
+                    <p className="text-[11px] text-outline mt-0.5">Scope: {a.assignment_scope}</p>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                      a.is_enabled ? 'bg-primary-fixed text-on-primary-fixed' : 'bg-surface-container text-outline'
+                    }`}
+                  >
+                    {a.is_enabled ? 'Enabled' : 'Paused'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-      </div>
-      </>
+      ) : activeTab === 'approvals' ? (
+        /* Pending Approvals — real approvals scoped to this dataset by name (this
+           task) — ApprovalRequestResponse carries no dataset id directly, only
+           resolvable via review_run -> validation_run -> dataset_id, already done
+           once for the whole Approval Center list this reuses. */
+        <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="font-editorial text-xl font-bold text-on-surface">Approvals for This Dataset</h3>
+              <p className="text-xs text-outline">Review runs on this dataset awaiting a publish decision</p>
+            </div>
+            <button
+              onClick={() => onNavigate('approval-center')}
+              className="text-xs font-bold text-primary hover:underline cursor-pointer"
+            >
+              View All Approvals &rarr;
+            </button>
+          </div>
+          {!canViewApprovals ? (
+            <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 flex items-center gap-2 text-xs text-on-surface-variant">
+              <span className="material-symbols-outlined text-base text-outline">lock</span>
+              You need the approval.read permission to see approvals for this dataset.
+            </div>
+          ) : approvals.length === 0 ? (
+            <p className="text-xs text-outline italic py-4">No approval requests reference this dataset yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {approvals.map((a) => (
+                <div
+                  key={a.id}
+                  className="flex items-center justify-between gap-3 p-3.5 bg-surface-container-low rounded-md border border-outline-variant"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-on-surface truncate">{a.reviewRunName}</p>
+                    <p className="text-[11px] text-outline mt-0.5">
+                      {a.affectedIssueCount} issue{a.affectedIssueCount === 1 ? '' : 's'} &bull; requested by{' '}
+                      {a.requestedBy}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0 ${
+                      a.status === 'PENDING'
+                        ? 'bg-secondary-fixed text-on-secondary-fixed'
+                        : a.status === 'APPROVED'
+                        ? 'bg-primary-fixed text-on-primary-fixed'
+                        : 'bg-surface-container text-outline'
+                    }`}
+                  >
+                    {a.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Overview — real validation-run summary (this task) */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {latestCompletedRun ? (
+              <>
+                <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-outline">Passed Rows</span>
+                  <div className="flex items-baseline gap-2 mt-3">
+                    <span className="font-editorial text-4xl font-extrabold text-primary">
+                      {latestCompletedRun.totalRows > 0
+                        ? Math.round((latestCompletedRun.passedRows / latestCompletedRun.totalRows) * 100)
+                        : 0}
+                      %
+                    </span>
+                    <span className="text-xs text-outline">of {latestCompletedRun.totalRows.toLocaleString()} rows</span>
+                  </div>
+                  <p className="text-xs text-outline mt-3 font-sans">{latestCompletedRun.passedRows.toLocaleString()} rows passed every check</p>
+                </div>
+                <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-outline">Warning Rows</span>
+                  <div className="flex items-baseline gap-2 mt-3">
+                    <span className="font-editorial text-4xl font-extrabold text-secondary">
+                      {latestCompletedRun.warningRows.toLocaleString()}
+                    </span>
+                    <span className="text-xs text-outline">rows</span>
+                  </div>
+                  <p className="text-xs text-outline mt-3 font-sans">Flagged by rules but not rejected</p>
+                </div>
+                <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-outline">Failed Rows</span>
+                  <div className="flex items-baseline gap-2 mt-3">
+                    <span className="font-editorial text-4xl font-extrabold text-on-error-container">
+                      {latestCompletedRun.failedRows.toLocaleString()}
+                    </span>
+                    <span className="text-xs text-outline">rows</span>
+                  </div>
+                  <p className="text-xs text-outline mt-3 font-sans">
+                    From the run completed {latestCompletedRun.completedAt}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <div className="md:col-span-3 bg-white rounded-lg p-6 border border-outline-variant shadow-ambient text-center text-sm text-on-surface-variant">
+                No completed validation run yet for this dataset — run one above to see real quality metrics here.
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+              {/* Real top validation failures from the latest completed run */}
+              <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="font-editorial text-xl font-bold text-on-surface">Important Issues &amp; Anomalies</h3>
+                    <p className="text-xs text-outline">
+                      {latestCompletedRun ? 'Top failures from the most recent completed run' : 'No completed run to draw issues from yet'}
+                    </p>
+                  </div>
+                  {latestFailures.length > 0 && (
+                    <button
+                      onClick={() => onNavigate('review-corrections')}
+                      className="text-xs font-bold text-primary hover:underline cursor-pointer"
+                    >
+                      Review All &rarr;
+                    </button>
+                  )}
+                </div>
+
+                {latestFailures.length === 0 ? (
+                  <p className="text-xs text-outline italic py-4">
+                    {latestCompletedRun ? 'No failures recorded in the most recent run.' : 'Run validation to see real issues here.'}
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {latestFailures.map((issue) => (
+                      <div
+                        key={issue.id}
+                        className="p-4 bg-surface-container-low rounded-md border border-outline-variant flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-primary transition-colors"
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          <span
+                            className={`material-symbols-outlined text-xl mt-0.5 shrink-0 ${
+                              issue.severity === 'CRITICAL' || issue.severity === 'HIGH'
+                                ? 'text-on-error-container'
+                                : issue.severity === 'MEDIUM'
+                                ? 'text-secondary'
+                                : 'text-tertiary'
+                            }`}
+                          >
+                            warning
+                          </span>
+                          <div className="min-w-0">
+                            <h4 className="text-xs font-bold text-on-surface truncate">{issue.rule_name}</h4>
+                            <p className="text-xs text-on-surface-variant mt-0.5 font-sans truncate">
+                              {issue.column_name ? `Column: ${issue.column_name} — ` : ''}
+                              {issue.reason ?? issue.rule_type}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="text-xs font-bold text-on-error-container bg-error-container px-2 py-1 rounded border border-on-error-container/20 shrink-0 self-end sm:self-auto">
+                          {issue.severity}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Real columns list — replaces the fabricated "Geographic
+                  Distribution of Records" card with data this component was
+                  already given but never rendered. */}
+              <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                <h3 className="font-editorial text-xl font-bold text-on-surface mb-1">Columns</h3>
+                <p className="text-xs text-outline mb-5">Schema discovered for this dataset</p>
+
+                {columns.length === 0 ? (
+                  <p className="text-xs text-outline italic">No columns discovered yet.</p>
+                ) : (
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {columns.map((col) => (
+                      <div
+                        key={col.id}
+                        className={`flex items-center gap-2.5 py-2 px-3 rounded-md text-xs ${
+                          !col.is_active ? 'opacity-60' : 'bg-surface-container-low'
+                        }`}
+                      >
+                        <span className="material-symbols-outlined text-sm text-outline">
+                          {col.is_primary_key ? 'key' : 'view_column'}
+                        </span>
+                        <span className="font-mono font-semibold text-on-surface">{col.name}</span>
+                        <span className="font-mono text-[11px] text-on-surface-variant bg-white px-1.5 py-0.5 rounded border border-outline-variant">
+                          {col.normalized_data_type}
+                        </span>
+                        {!col.is_nullable && (
+                          <span className="text-[10px] font-semibold text-outline uppercase tracking-wider">Not Null</span>
+                        )}
+                        {!col.is_active && (
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-surface-container text-outline ml-auto">
+                            Inactive
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Real recent validation run history — replaces the fabricated
+                account-activity timeline. */}
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg p-6 border border-outline-variant shadow-ambient">
+                <h3 className="font-editorial text-xl font-bold text-on-surface mb-4">Recent Validation Runs</h3>
+
+                {validationRuns.length === 0 ? (
+                  <p className="text-xs text-outline italic">No validation runs yet for this dataset.</p>
+                ) : (
+                  <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-surface-container">
+                    {validationRuns.slice(0, 6).map((run) => (
+                      <div key={run.id} className="relative">
+                        <span
+                          className={`absolute -left-[23px] top-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
+                            run.status === 'COMPLETED'
+                              ? 'bg-primary'
+                              : run.status === 'FAILED'
+                              ? 'bg-error'
+                              : 'bg-secondary'
+                          }`}
+                        />
+                        <p className="text-xs font-semibold text-on-surface leading-snug">
+                          Validation run{' '}
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                              STATUS_STYLES[run.status] ?? 'bg-surface-container text-outline'
+                            }`}
+                          >
+                            {run.status}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-outline mt-0.5">{run.startedAt}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

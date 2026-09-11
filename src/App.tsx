@@ -45,7 +45,9 @@ import {
   listDatasets,
   getDataset,
   listDatasetColumns,
+  getDatasetPreview,
   DatasetResponse,
+  DatasetPreviewResponse,
   ColumnResponse,
   listProfileRuns,
   ProfileRunResponse,
@@ -474,6 +476,14 @@ export default function App() {
   const [deColumns, setDeColumns] = useState<ExplorerColumn[]>([]);
   const [dataExplorerLoading, setDataExplorerLoading] = useState(false);
   const [dataExplorerError, setDataExplorerError] = useState<string | null>(null);
+  // BUG FIX (this task): "View Datasets" on a Data Source card used to navigate to
+  // Dataset Overview with no dataset selected, landing on its "no selection" empty
+  // prompt. Routes to Data Explorer instead, scoped to just this source's schemas —
+  // cleared automatically on leaving the screen so a stale filter doesn't persist
+  // if the user returns via the sidebar directly.
+  const [explorerDataSourceFilter, setExplorerDataSourceFilter] = useState<{ id: string; name: string } | null>(
+    null
+  );
 
   // Dataset Overview — selection comes from Data Explorer's "Open Dataset" action.
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
@@ -481,6 +491,15 @@ export default function App() {
   const [selectedDatasetColumns, setSelectedDatasetColumns] = useState<ColumnResponse[]>([]);
   const [datasetOverviewLoading, setDatasetOverviewLoading] = useState(false);
   const [datasetOverviewError, setDatasetOverviewError] = useState<string | null>(null);
+  // Real top validation failures from this dataset's latest COMPLETED run (this
+  // task) — replaces the Overview tab's old hardcoded DATASET_ISSUES mock list.
+  const [datasetOverviewFailures, setDatasetOverviewFailures] = useState<ValidationFailureResponse[]>([]);
+  const [datasetOverviewFailuresLoading, setDatasetOverviewFailuresLoading] = useState(false);
+  // Real live preview rows from GET /datasets/{id}/preview (this task) — this
+  // endpoint was built on the backend but never had a frontend consumer before.
+  const [datasetPreview, setDatasetPreview] = useState<DatasetPreviewResponse | null>(null);
+  const [datasetPreviewLoading, setDatasetPreviewLoading] = useState(false);
+  const [datasetPreviewError, setDatasetPreviewError] = useState<string | null>(null);
 
   // Data Profiling — dataset-level ProfileRunResponse history, not per-column stats
   // (the backend's ColumnProfileResponse schema exists but isn't wired to any route).
@@ -826,9 +845,17 @@ export default function App() {
         if (!connectionId) return false;
         return connectionActiveById.get(connectionId) === false;
       };
+      // Lets Data Explorer be filtered to a single data source (Data Sources'
+      // "View Datasets" action) — same connection -> data source chain as above.
+      const dataSourceIdByConnectionId = new Map(connections.map((c) => [c.id, c.data_source_id]));
 
       setDeSchemas(
-        allSchemas.map((s) => ({ id: s.id, name: s.name, datasetCount: datasetCountBySchema.get(s.id) ?? 0 }))
+        allSchemas.map((s) => ({
+          id: s.id,
+          name: s.name,
+          datasetCount: datasetCountBySchema.get(s.id) ?? 0,
+          dataSourceId: dataSourceIdByConnectionId.get(s.connection_id) ?? null,
+        }))
       );
       setDeDatasets(
         allDatasets.map((d) => ({
@@ -889,6 +916,70 @@ export default function App() {
       })
       .finally(() => {
         if (!cancelled) setDatasetOverviewLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedDatasetId]);
+
+  // Dataset Overview's real quality-issues list (this task) — the top failures
+  // from this dataset's most recent COMPLETED validation run, reusing the same
+  // listValidationFailures already wired for Validation Run Details. Depends on
+  // validationRuns (fetched by the broadened effect above) rather than its own
+  // dataset-id lookup, since that's already the real, ordered (newest-first)
+  // source of truth for "which run is latest."
+  useEffect(() => {
+    if (currentScreen !== 'dataset-overview') return;
+    if (!selectedDatasetId) return;
+    if (!hasPermission('metadata.read')) return;
+    const latestCompleted = validationRuns.find((r) => r.status === 'COMPLETED');
+    if (!latestCompleted) {
+      setDatasetOverviewFailures([]);
+      return;
+    }
+
+    let cancelled = false;
+    setDatasetOverviewFailuresLoading(true);
+    listValidationFailures(latestCompleted.id, { page_size: 5 })
+      .then((resp) => {
+        if (!cancelled) setDatasetOverviewFailures(resp.items);
+      })
+      .catch(() => {
+        if (!cancelled) setDatasetOverviewFailures([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDatasetOverviewFailuresLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedDatasetId, validationRuns]);
+
+  // Data Preview tab (this task) — first real frontend consumer of
+  // GET /datasets/{id}/preview, gated on data_preview.read (confirmed via
+  // app/api/v1/datasets/routes.py). Live read against the actual source
+  // database, never cached/re-derived client-side.
+  useEffect(() => {
+    if (currentScreen !== 'dataset-preview') return;
+    if (!selectedDatasetId) return;
+    if (!hasPermission('data_preview.read')) return;
+
+    let cancelled = false;
+    setDatasetPreviewLoading(true);
+    setDatasetPreviewError(null);
+    getDatasetPreview(selectedDatasetId)
+      .then((preview) => {
+        if (!cancelled) setDatasetPreview(preview);
+      })
+      .catch((err) => {
+        if (!cancelled) setDatasetPreviewError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setDatasetPreviewLoading(false);
       });
 
     return () => {
@@ -1260,9 +1351,13 @@ export default function App() {
   // --- Core decision workflow fetches (this batch) ----------------------------------
 
   // Data Quality Rules: list rules + assignments, then each rule's versions (needed to
-  // find the current version id for creating new assignments).
+  // find the current version id for creating new assignments). Also fetched when
+  // landing on Dataset Overview (this task) — its Quality Rules tab filters this
+  // exact same state down to the current dataset's assignments rather than
+  // duplicating a parallel fetch (resolving an assignment's rule name needs the
+  // same rule->versions map either way, so there's no cheaper alternative fetch).
   useEffect(() => {
-    if (currentScreen !== 'quality-rules') return;
+    if (currentScreen !== 'quality-rules' && currentScreen !== 'dataset-overview') return;
     if (!hasPermission('rules.read')) return;
 
     let cancelled = false;
@@ -1298,9 +1393,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentScreen]);
 
-  // Validation Workspace: list validation runs for the selected dataset.
+  // Validation Workspace: list validation runs for the selected dataset. Also
+  // fetched when landing on Dataset Overview (this task) — the Overview tab
+  // reuses this exact same state for its real quality/issue summary instead of
+  // duplicating a parallel fetch.
   useEffect(() => {
-    if (currentScreen !== 'validation-workspace') return;
+    if (currentScreen !== 'validation-workspace' && currentScreen !== 'dataset-overview') return;
     if (!selectedDatasetId) return;
     if (!hasPermission('metadata.read')) return;
 
@@ -1523,9 +1621,12 @@ export default function App() {
   }, [currentScreen]);
 
   // Approval Center: list approvals, then resolve each one's review name, dataset name,
-  // and requester display name (all real, via chained real endpoints).
+  // and requester display name (all real, via chained real endpoints). Also fetched
+  // when landing on Dataset Overview (this task) — its Pending Approvals tab filters
+  // this exact same resolved state down to the current dataset, by name (the
+  // mapped ApprovalRequestItem carries no dataset id, only the resolved name).
   useEffect(() => {
-    if (currentScreen !== 'approval-center') return;
+    if (currentScreen !== 'approval-center' && currentScreen !== 'dataset-overview') return;
     if (!hasPermission('approval.read')) return;
 
     let cancelled = false;
@@ -1608,6 +1709,21 @@ export default function App() {
     setCurrentScreen(screen);
     setIsMobileNavOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Clears the "View Datasets" scoping filter whenever Data Explorer isn't the
+  // active screen, so navigating away and back in via the sidebar directly always
+  // starts unfiltered rather than silently keeping a stale scope.
+  useEffect(() => {
+    if (currentScreen !== 'data-explorer' && explorerDataSourceFilter !== null) {
+      setExplorerDataSourceFilter(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen]);
+
+  const handleViewDatasetsForSource = (dataSourceId: string, dataSourceName: string) => {
+    setExplorerDataSourceFilter({ id: dataSourceId, name: dataSourceName });
+    handleNavigate('data-explorer');
   };
 
   // Toggles a rule between ACTIVE/DISABLED via the real PATCH endpoint (rules.manage).
@@ -2787,7 +2903,6 @@ export default function App() {
               dataSourcesError,
               <DataSourcesView
                 dataSources={dataSources}
-                onNavigate={handleNavigate}
                 onOpenAddSource={() => handleNavigate('add-data-source')}
                 onSyncSource={handleSyncConnection}
                 syncingConnectionId={syncingConnectionId}
@@ -2805,6 +2920,7 @@ export default function App() {
                 onDeactivateConnection={handleDeactivateConnection}
                 onReactivateSource={handleReactivateDataSource}
                 onReactivateConnection={handleReactivateConnection}
+                onViewDatasets={handleViewDatasetsForSource}
               />
             )}
 
@@ -2826,6 +2942,18 @@ export default function App() {
                     connectionInactive={
                       deDatasets.find((d) => d.id === selectedDatasetId)?.connectionInactive ?? false
                     }
+                    validationRuns={validationRuns}
+                    latestFailures={datasetOverviewFailures}
+                    onRunValidation={handleRunValidation}
+                    canTriggerValidation={hasPermission('validation.run')}
+                    isTriggeringValidation={isTriggeringValidation}
+                    validationActionError={validationActionError}
+                    canViewRules={hasPermission('rules.read')}
+                    rules={rules}
+                    ruleVersionsByRuleId={ruleVersionsByRuleId}
+                    ruleAssignments={ruleAssignments.filter((a) => a.dataset_id === selectedDatasetId)}
+                    canViewApprovals={hasPermission('approval.read')}
+                    approvals={approvalQueue.filter((a) => a.datasetName === selectedDataset?.name)}
                   />
                 )
               )
@@ -2838,6 +2966,10 @@ export default function App() {
               connectionInactive={
                 deDatasets.find((d) => d.id === selectedDatasetId)?.connectionInactive ?? false
               }
+              canViewPreview={hasPermission('data_preview.read')}
+              preview={datasetPreview}
+              previewLoading={datasetPreviewLoading}
+              previewError={datasetPreviewError}
             />
           )}
 
@@ -2857,6 +2989,8 @@ export default function App() {
                   setSelectedDatasetId(datasetId);
                   handleNavigate('dataset-overview');
                 }}
+                dataSourceFilter={explorerDataSourceFilter}
+                onClearDataSourceFilter={() => setExplorerDataSourceFilter(null)}
               />
             )}
 

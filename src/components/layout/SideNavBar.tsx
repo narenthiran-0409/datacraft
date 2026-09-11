@@ -24,18 +24,26 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
       id: 'data-sources' as NavScreen,
       label: 'Data',
       icon: 'database',
-      // Active also if on dataset-overview or dataset-preview
-      isActive:
-        currentScreen === 'data-sources' ||
-        currentScreen === 'dataset-overview' ||
-        currentScreen === 'dataset-preview',
+      isActive: currentScreen === 'data-sources',
     },
     {
       id: 'data-explorer' as NavScreen,
       label: 'Data Explorer',
       icon: 'account_tree',
+      // BUG FIX: dataset-overview/dataset-preview used to be lumped under "Data"
+      // (Data Sources), which was wrong the moment Data Explorer's own dataset
+      // drill-down ("Open Dataset") became a real path to the same screens —
+      // clicking a dataset in Data Explorer left "Data" highlighted instead of
+      // "Data Explorer". They're both dataset-detail views reached via Data
+      // Explorer's own drill-down (Data Sources' "View Datasets" now routes to
+      // Data Explorer itself, not to these screens directly), so Data Explorer
+      // is the correct parent for both, matching the existing data-profiling
+      // precedent below.
       isActive:
-        currentScreen === 'data-explorer' || currentScreen === 'data-profiling',
+        currentScreen === 'data-explorer' ||
+        currentScreen === 'data-profiling' ||
+        currentScreen === 'dataset-overview' ||
+        currentScreen === 'dataset-preview',
     },
     {
       id: 'validation-workspace' as NavScreen,

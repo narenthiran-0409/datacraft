@@ -607,11 +607,13 @@ export const INITIAL_SCHEMAS: SchemaNode[] = [
     id: 'schema-1',
     name: 'public (Corporate PostgreSQL)',
     datasetCount: 3,
+    dataSourceId: null,
   },
   {
     id: 'schema-2',
     name: 'analytics (Snowflake Warehouse)',
     datasetCount: 2,
+    dataSourceId: null,
   },
 ];
 

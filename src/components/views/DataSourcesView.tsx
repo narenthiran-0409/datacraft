@@ -1,10 +1,9 @@
 import React, { useState } from 'react';
-import { DataSource, NavScreen } from '../../types';
+import { DataSource } from '../../types';
 import { ConnectionResponse, ConnectionTypeResponse, DataSourceUpdateRequest } from '../../api/client';
 
 interface DataSourcesViewProps {
   dataSources: DataSource[];
-  onNavigate: (screen: NavScreen) => void;
   onOpenAddSource: () => void;
   // Takes the connection id (discovery runs against a connection, not a data
   // source) — the view resolves which connection via its own `connections`
@@ -25,11 +24,14 @@ interface DataSourcesViewProps {
   onDeactivateConnection: (id: string) => Promise<boolean>;
   onReactivateSource: (id: string) => Promise<boolean>;
   onReactivateConnection: (id: string) => Promise<boolean>;
+  // BUG FIX (this task): used to navigate to Dataset Overview with nothing
+  // selected, landing on its "no selection" empty prompt. Routes to Data
+  // Explorer, scoped to this source, instead.
+  onViewDatasets: (dataSourceId: string, dataSourceName: string) => void;
 }
 
 export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   dataSources,
-  onNavigate,
   onOpenAddSource,
   onSyncSource,
   syncingConnectionId,
@@ -47,6 +49,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
   onDeactivateConnection,
   onReactivateSource,
   onReactivateConnection,
+  onViewDatasets,
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'database' | 'api' | 'file'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -226,7 +229,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
           return (
             <div
               key={source.id}
-              onClick={() => onNavigate('dataset-overview')}
+              onClick={() => onViewDatasets(source.id, source.name)}
               className={`bg-white rounded-lg p-6 border border-outline-variant shadow-ambient shadow-ambient-hover cursor-pointer flex flex-col justify-between group transition-all ${
                 isInactive ? 'opacity-60' : ''
               }`}
@@ -394,7 +397,7 @@ export const DataSourcesView: React.FC<DataSourcesViewProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onNavigate('dataset-overview');
+                      onViewDatasets(source.id, source.name);
                     }}
                     className="text-xs font-semibold text-on-surface-variant hover:text-on-surface flex items-center gap-1 group-hover:translate-x-0.5 transition-transform cursor-pointer"
                   >

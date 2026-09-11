@@ -175,6 +175,11 @@ export interface SchemaNode {
   id: string;
   name: string;
   datasetCount: number;
+  // Additive (this task): derived client-side from schema.connection_id ->
+  // connection.data_source_id, so Data Explorer can be filtered down to a single
+  // data source's schemas (used by Data Sources' "View Datasets" action). Null
+  // when the owning connection couldn't be resolved (e.g. connections.read missing).
+  dataSourceId: string | null;
 }
 
 export interface ExplorerDataset {

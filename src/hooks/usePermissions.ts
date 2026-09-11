@@ -47,6 +47,10 @@ export const PERMISSION_CODES = [
   'rules.read',
   'rules.manage',
   'rule_assignments.manage',
+  // 0018_data_preview_permission — seeded well before this task, but never
+  // referenced anywhere client-side until Data Preview's real endpoint was
+  // finally wired up here.
+  'data_preview.read',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];

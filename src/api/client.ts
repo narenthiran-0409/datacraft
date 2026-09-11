@@ -560,6 +560,37 @@ export function patchDataset(datasetId: string, input: DatasetPatchRequest): Pro
   return apiRequest(`/datasets/${datasetId}`, { method: 'PATCH', body: input });
 }
 
+export interface DatasetPreviewQuery {
+  row_count?: number;
+}
+
+/**
+ * A live, bounded read straight from the source database via the dataset's own
+ * connection — never any table this platform owns. Confirmed against
+ * app/api/v1/datasets/routes.py (preview_dataset) + PreviewService: row_count is
+ * silently clamped server-side to PREVIEW_MAX_ROWS (100) rather than rejected,
+ * and every string cell is truncated to 100 characters. This was built on the
+ * backend (Phase: "Add Data Preview") but never had a frontend consumer until
+ * now — this is genuinely the first real caller.
+ */
+export interface DatasetPreviewResponse {
+  dataset_id: string;
+  schema_name: string;
+  table_name: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  row_count: number;
+  requested_row_count: number;
+  capped_to_max: boolean;
+}
+
+export function getDatasetPreview(
+  datasetId: string,
+  query: DatasetPreviewQuery = {}
+): Promise<DatasetPreviewResponse> {
+  return apiRequest(`/datasets/${datasetId}/preview${buildQuery(query)}`);
+}
+
 // --- Profiling -----------------------------------------------------------
 
 export interface ProfileRunResponse {

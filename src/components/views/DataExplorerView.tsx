@@ -7,6 +7,11 @@ interface DataExplorerViewProps {
   datasets: ExplorerDataset[];
   columns: ExplorerColumn[];
   onOpenDataset: (datasetId: string) => void;
+  // BUG FIX (this task): Data Sources' "View Datasets" used to navigate to
+  // Dataset Overview with nothing selected. Routes here instead, scoped to just
+  // this data source's schemas, via App.tsx state — not a URL param.
+  dataSourceFilter: { id: string; name: string } | null;
+  onClearDataSourceFilter: () => void;
 }
 
 export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
@@ -15,7 +20,13 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
   datasets,
   columns,
   onOpenDataset,
+  dataSourceFilter,
+  onClearDataSourceFilter,
 }) => {
+  const visibleSchemas = dataSourceFilter
+    ? schemas.filter((s) => s.dataSourceId === dataSourceFilter.id)
+    : schemas;
+
   const [expandedSchemas, setExpandedSchemas] = useState<string[]>([schemas[0]?.id].filter(Boolean));
   const [expandedDatasets, setExpandedDatasets] = useState<string[]>([]);
   const [showInactiveConnections, setShowInactiveConnections] = useState(false);
@@ -60,9 +71,32 @@ export const DataExplorerView: React.FC<DataExplorerViewProps> = ({
         )}
       </div>
 
+      {dataSourceFilter && (
+        <div className="flex items-center gap-2 -mt-4">
+          <span className="inline-flex items-center gap-2 text-xs font-semibold text-primary bg-surface-container-high px-3 py-1.5 rounded-full border border-outline-variant">
+            <span className="material-symbols-outlined text-sm">filter_alt</span>
+            Filtered to: {dataSourceFilter.name}
+            <button
+              type="button"
+              onClick={onClearDataSourceFilter}
+              className="material-symbols-outlined text-sm text-outline hover:text-on-surface cursor-pointer"
+              title="Clear filter"
+            >
+              close
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* Schema Tree */}
       <div className="space-y-4">
-        {schemas.map((schema) => {
+        {visibleSchemas.length === 0 && dataSourceFilter && (
+          <div className="bg-white rounded-lg border border-outline-variant p-8 text-center text-sm text-on-surface-variant">
+            No schemas discovered yet for "{dataSourceFilter.name}". Run a sync from Data Sources
+            once a connection is configured.
+          </div>
+        )}
+        {visibleSchemas.map((schema) => {
           // Computed from the dataset list itself (grouped by schemaId) rather than
           // assumed from the schema's own connection — a schema with SOME but not
           // ALL of its datasets on an inactive connection must still show, with only
