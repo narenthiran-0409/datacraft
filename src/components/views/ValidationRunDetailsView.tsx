@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavScreen, ValidationRun } from '../../types';
-import { ValidationFailureResponse } from '../../api/client';
+import { EvaluatedRuleResponse, ValidationFailureResponse } from '../../api/client';
+import { Select } from '../ui/Select';
 
 interface ValidationRunDetailsViewProps {
   onNavigate: (screen: NavScreen) => void;
@@ -21,6 +22,9 @@ interface ValidationRunDetailsViewProps {
   onFailuresSeverityChange: (severity: string) => void;
   failuresLoading: boolean;
   failuresError: string | null;
+  evaluatedRules: EvaluatedRuleResponse[];
+  evaluatedRulesLoading: boolean;
+  evaluatedRulesError: string | null;
 }
 
 const STATUS_STYLES: Record<ValidationRun['status'], string> = {
@@ -69,6 +73,9 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
   onFailuresSeverityChange,
   failuresLoading,
   failuresError,
+  evaluatedRules,
+  evaluatedRulesLoading,
+  evaluatedRulesError,
 }) => {
   if (!run) {
     return (
@@ -93,6 +100,12 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
   const warningPct = total ? (run.warningRows / total) * 100 : 0;
   const failedPct = total ? (run.failedRows / total) * 100 : 0;
   const totalPages = Math.max(1, Math.ceil(failuresTotal / failuresPageSize));
+
+  // A COMPLETED run with zero resolved RuleAssignments still trivially scores
+  // every row PASSED / quality_score=100 (see backend tasks.py) — this run
+  // must never be presented the same way as a genuine all-pass validation.
+  const noApplicableRules = run.status === 'COMPLETED' && run.noApplicableRules === true;
+  const rulesEvaluatedCount = run.rulesEvaluatedCount ?? 0;
 
   return (
     <div className="p-6 md:p-10 max-w-5xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -152,21 +165,72 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
             <span>{actionError}</span>
           </div>
         )}
+
+        {/* Deliberately NOT styled like a success state — this is the one
+            thing this screen must never let read as "100% Passed". */}
+        {noApplicableRules && (
+          <div className="mt-4 rounded-md border border-secondary/40 bg-secondary-fixed/30 px-4 py-3.5 max-w-2xl">
+            <div className="flex items-start gap-2.5">
+              <span className="material-symbols-outlined text-base text-on-secondary-fixed shrink-0 mt-0.5">
+                warning
+              </span>
+              <div>
+                <p className="text-sm font-bold text-on-secondary-fixed">
+                  No applicable rules were evaluated for this dataset.
+                </p>
+                <p className="text-xs text-on-secondary-fixed/80 mt-1">
+                  Rules evaluated: 0. Every row trivially scored as passed because there was
+                  nothing to check it against — this is not a validated result.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('dataset-overview')}
+                  className="mt-2.5 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                >
+                  Go to Dataset Overview to analyze &amp; suggest rules, or assign existing ones &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-5">
         <div className="bg-white rounded-lg p-5 border border-outline-variant shadow-ambient">
           <span className="text-[11px] font-semibold text-outline uppercase tracking-wider block mb-2">
             Quality Score
           </span>
-          <span className="font-editorial text-3xl font-extrabold text-primary">
-            {run.qualityScore !== null ? `${run.qualityScore}%` : '—'}
-          </span>
-          {run.qualityScore === null && (
+          {noApplicableRules ? (
+            <>
+              <span className="font-editorial text-2xl font-extrabold text-outline">No rules evaluated</span>
+              <p className="text-[11px] text-outline mt-1">Score not meaningful with 0 rules evaluated.</p>
+            </>
+          ) : (
+            <span className="font-editorial text-3xl font-extrabold text-primary">
+              {run.qualityScore !== null ? `${run.qualityScore}%` : '—'}
+            </span>
+          )}
+          {!noApplicableRules && run.qualityScore === null && (
             <p className="text-[11px] text-outline mt-1">
               Not available — this run did not complete.
             </p>
+          )}
+        </div>
+
+        <div className="bg-white rounded-lg p-5 border border-outline-variant shadow-ambient">
+          <span className="text-[11px] font-semibold text-outline uppercase tracking-wider block mb-2">
+            Rules Evaluated
+          </span>
+          <span
+            className={`font-editorial text-3xl font-extrabold ${
+              rulesEvaluatedCount === 0 ? 'text-outline' : 'text-on-surface'
+            }`}
+          >
+            {rulesEvaluatedCount}
+          </span>
+          {rulesEvaluatedCount === 0 && (
+            <p className="text-[11px] text-outline mt-1">No enabled rule assignments for this dataset.</p>
           )}
         </div>
 
@@ -231,6 +295,56 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
         )}
       </div>
 
+      {/* Rules Evaluated — real, via GET /validation-runs/{id}/evaluated-rules. Shows
+          every resolved rule assignment including ones that produced zero failures
+          (which never show up in the Failure Detail table below), so a data steward
+          can see exactly what was checked, not just how many rows failed. */}
+      <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6 space-y-4">
+        <h3 className="font-editorial font-bold text-lg text-on-surface">Rules Evaluated</h3>
+
+        {evaluatedRulesError ? (
+          <p className="text-xs text-error flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-sm">error</span>
+            {evaluatedRulesError}
+          </p>
+        ) : evaluatedRulesLoading ? (
+          <div className="space-y-2">
+            {[0, 1].map((i) => (
+              <div key={i} className="h-10 bg-surface-container-low rounded-md animate-pulse" />
+            ))}
+          </div>
+        ) : evaluatedRules.length === 0 ? (
+          <p className="text-xs text-outline italic">
+            No rules were evaluated for this run.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-outline border-b border-outline-variant">
+                  <th className="pb-2 pr-3">Rule</th>
+                  <th className="pb-2 pr-3">Type</th>
+                  <th className="pb-2 pr-3">Column</th>
+                  <th className="pb-2 pr-3">Origin</th>
+                  <th className="pb-2">Severity</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-container">
+                {evaluatedRules.map((r) => (
+                  <tr key={r.rule_assignment_id}>
+                    <td className="py-2 pr-3 font-semibold text-on-surface">{r.rule_name}</td>
+                    <td className="py-2 pr-3 font-mono text-on-surface-variant">{r.rule_type}</td>
+                    <td className="py-2 pr-3 font-mono text-on-surface-variant">{r.column_name ?? '—'}</td>
+                    <td className="py-2 pr-3 text-on-surface-variant">{r.rule_origin}</td>
+                    <td className="py-2 text-on-surface-variant">{r.severity}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Failure Detail — real, paginated, via GET /validation-runs/{id}/failures */}
       <div className="bg-white rounded-lg border border-outline-variant shadow-ambient p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -247,18 +361,13 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
               dropdowns with real names would require a second lookup call, and
               severity alone (a small, fixed set of values) already covers the
               common triage case; left as a deliberate scope choice. */}
-          <select
+          <Select
             value={failuresSeverity}
-            onChange={(e) => onFailuresSeverityChange(e.target.value)}
-            className="bg-surface-container-low border border-outline-variant rounded-md px-3 py-1.5 text-xs text-on-surface focus:outline-none focus:border-primary"
-          >
-            <option value="">All severities</option>
-            {SEVERITY_OPTIONS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+            onChange={onFailuresSeverityChange}
+            options={[{ value: '', label: 'All severities' }, ...SEVERITY_OPTIONS.map((s) => ({ value: s, label: s }))]}
+            aria-label="Filter by severity"
+            size="sm"
+          />
         </div>
 
         {failuresError ? (
@@ -300,7 +409,9 @@ export const ValidationRunDetailsView: React.FC<ValidationRunDetailsViewProps> =
                       <td className="py-2 pr-3 font-mono text-on-surface-variant">{f.column_name ?? '—'}</td>
                       <td className="py-2 pr-3">
                         <span className="font-semibold text-on-surface">{f.rule_name}</span>
-                        <span className="block text-[10px] text-outline">{f.rule_type}</span>
+                        <span className="block text-[10px] text-outline">
+                          {f.rule_type} &middot; {f.rule_origin}
+                        </span>
                       </td>
                       <td className="py-2 pr-3">
                         <span

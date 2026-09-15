@@ -3,11 +3,13 @@ import { NavScreen, ValidationRun, ApprovalRequestItem } from '../../types';
 import {
   ColumnResponse,
   DatasetResponse,
+  DatasetPreviewResponse,
   ValidationFailureResponse,
   RuleResponse,
   RuleVersionResponse,
   RuleAssignmentResponse,
 } from '../../api/client';
+import { DatasetPreviewView } from './DatasetPreviewView';
 
 interface DatasetOverviewViewProps {
   onNavigate: (screen: NavScreen) => void;
@@ -26,6 +28,10 @@ interface DatasetOverviewViewProps {
   isTriggeringValidation: boolean;
   validationActionError: string | null;
   canViewRules: boolean;
+  // V1.0 — distinguishes "still fetching" from "genuinely no rules assigned"
+  // (see the rules.read section below); this dataset's own overview fetch
+  // resolving first must never make an in-flight rules fetch look empty.
+  rulesLoading: boolean;
   rules: RuleResponse[];
   ruleVersionsByRuleId: Record<string, RuleVersionResponse[]>;
   ruleAssignments: RuleAssignmentResponse[]; // pre-filtered to this dataset by the caller
@@ -42,6 +48,13 @@ interface DatasetOverviewViewProps {
   ruleReviewActionError: string | null;
   canViewApprovals: boolean;
   approvals: ApprovalRequestItem[]; // pre-filtered to this dataset by the caller
+  // Preview Table tab (real GET /datasets/{id}/preview, fetched in App.tsx) —
+  // this tab used to navigate to a separate DatasetPreviewView screen; it now
+  // renders that same component embedded, so it behaves like the other tabs.
+  canViewPreview: boolean;
+  preview: DatasetPreviewResponse | null;
+  previewLoading: boolean;
+  previewError: string | null;
 }
 
 const formatDateTime = (iso: string | null) =>
@@ -69,6 +82,7 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   isTriggeringValidation,
   validationActionError,
   canViewRules,
+  rulesLoading,
   rules,
   ruleVersionsByRuleId,
   ruleAssignments,
@@ -84,13 +98,22 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
   ruleReviewActionError,
   canViewApprovals,
   approvals,
+  canViewPreview,
+  preview,
+  previewLoading,
+  previewError,
 }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'rules' | 'approvals'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'preview' | 'rules' | 'approvals'>('overview');
 
   const rowCount = dataset.row_count_estimate ?? 0;
   const columnCount = dataset.column_count ?? columns.length;
   const latestCompletedRun = validationRuns.find((r) => r.status === 'COMPLETED') ?? null;
-  const hasActiveValidationRun = validationRuns.some((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
+  // 'CREATED' is the backend's own initial status the instant createValidationRun
+  // resolves, before the async job even reaches QUEUED — omitting it here left
+  // a real window where a just-triggered run didn't read as "active" yet.
+  const hasActiveValidationRun = validationRuns.some(
+    (r) => r.status === 'CREATED' || r.status === 'QUEUED' || r.status === 'RUNNING'
+  );
 
   // Resolves an assignment's rule name the same way QualityRulesView does: match
   // the assignment's rule_version_id against each rule's known set of version ids.
@@ -204,12 +227,14 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
               >
                 <span
                   className={`material-symbols-outlined text-lg ${
-                    isTriggeringValidation ? 'animate-spin' : ''
+                    isTriggeringValidation || hasActiveValidationRun ? 'animate-spin' : ''
                   }`}
                 >
-                  {isTriggeringValidation ? 'sync' : 'play_circle'}
+                  {isTriggeringValidation || hasActiveValidationRun ? 'sync' : 'play_circle'}
                 </span>
-                <span>{isTriggeringValidation ? 'Starting…' : 'Run Validation'}</span>
+                <span>
+                  {isTriggeringValidation ? 'Starting…' : hasActiveValidationRun ? 'Running…' : 'Run Validation'}
+                </span>
               </button>
             )}
           </div>
@@ -236,10 +261,13 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
             </button>
 
             <button
-              onClick={() => onNavigate('dataset-preview')}
-              className="pb-3 text-sm font-semibold text-outline hover:text-on-surface transition-all cursor-pointer"
+              onClick={() => setActiveTab('preview')}
+              className={`pb-3 text-sm font-semibold transition-all relative cursor-pointer ${
+                activeTab === 'preview' ? 'text-primary' : 'text-outline hover:text-on-surface'
+              }`}
             >
               Preview Table
+              {activeTab === 'preview' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary" />}
             </button>
 
             <button
@@ -304,6 +332,17 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
             </button>
           </div>
         </div>
+      ) : activeTab === 'preview' ? (
+        <DatasetPreviewView
+          onNavigate={onNavigate}
+          datasetName={dataset.name}
+          connectionInactive={connectionInactive}
+          canViewPreview={canViewPreview}
+          preview={preview}
+          previewLoading={previewLoading}
+          previewError={previewError}
+          embedded
+        />
       ) : activeTab === 'rules' ? (
         <div className="space-y-6">
           {/* Suggest Rules — whole-dataset detection (this task). Real async
@@ -454,6 +493,12 @@ export const DatasetOverviewView: React.FC<DatasetOverviewViewProps> = ({
               <div className="bg-surface-container-low rounded-md border border-outline-variant p-4 flex items-center gap-2 text-xs text-on-surface-variant">
                 <span className="material-symbols-outlined text-base text-outline">lock</span>
                 You need the rules.read permission to see rules assigned to this dataset.
+              </div>
+            ) : rulesLoading ? (
+              <div className="space-y-2">
+                {[0, 1].map((i) => (
+                  <div key={i} className="h-12 bg-surface-container-low rounded-md animate-pulse" />
+                ))}
               </div>
             ) : ruleAssignments.length === 0 ? (
               <p className="text-xs text-outline italic py-4">No quality rules are assigned to this dataset yet.</p>

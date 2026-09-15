@@ -18,7 +18,11 @@ export type NavScreen =
   | 'insights'
   | 'user-management'
   | 'settings'
-  | 'login';
+  | 'login'
+  // Real URL routing: shown when the current URL doesn't match any known
+  // route (see src/routing.ts) — deliberately distinct from any real screen
+  // so unknown URLs never silently render as Dashboard.
+  | 'not-found';
 
 // RESOLVED (Phase 3): the backend has no free-text `role` and no single
 // `platform_role` column at all — role is many-to-many via `user_roles`
@@ -134,6 +138,40 @@ export interface ReviewRun {
   totalIssues: number;
   resolvedIssues: number;
   createdAt: string;
+  // Additive (Staging & Publish dataset-centric redesign): the dataset this review
+  // run belongs to, resolved from its validation run's real dataset_id. Optional so
+  // existing mock data stays valid; lets a dataset-first screen (the new Staging &
+  // Publish explorer) find "the review for this dataset" without a dedicated
+  // reviews-by-dataset endpoint (none exists).
+  datasetId?: string;
+  // Additive (master/detail redesign): the real, unformatted ISO created_at —
+  // needed to deterministically pick "the latest review for this dataset" when
+  // more than one exists (see src/data/workflowResolution.ts). `createdAt`
+  // above is pre-formatted for display and must never be used for sorting.
+  createdAtRaw?: string;
+  // Additive (master/detail redesign): real updated_at, formatted for display
+  // in the Review & Corrections master's "Updated" column — reflects the most
+  // recent activity on the run, unlike createdAt (when it was first started).
+  updatedAt?: string;
+}
+
+// Phase 4.10 — the shape of CorrectionSuggestionResponse.evidence_detail
+// (app/modules/ai/suggestion_service.py's _advanced_evidence_summary), a
+// flat, aggregate-only dict — never raw source rows or other columns'
+// values. Every field optional/nullable since it's only ever populated
+// for AI suggestions where advanced inference actually ran; read
+// defensively and hide whatever isn't present rather than inventing it.
+export interface SuggestionEvidenceDetail {
+  available?: boolean;
+  ambiguous?: boolean | null;
+  strategies_attempted?: string[] | null;
+  strategies_agreeing?: string[] | null;
+  recommended_candidate?: string | null;
+  recommended_strategy?: string | null;
+  confidence?: number | null;
+  supporting_count?: number | null;
+  contradicting_count?: number | null;
+  reason?: string | null;
 }
 
 export interface Issue {
@@ -145,6 +183,14 @@ export interface Issue {
   originalValue: string;
   suggestedValue: string | null;
   suggestionSource: 'RULE_BASED' | 'AI' | null;
+  // Additive (optional so existing mock data stays valid): the confidence
+  // tier behind suggestedValue — see CorrectionSuggestionResponse.category.
+  // Absent/null for an issue with no suggestion yet.
+  suggestionCategory?: 'DETERMINISTIC' | 'AI_HIGH_CONFIDENCE' | 'NEEDS_REVIEW' | 'CANNOT_INFER' | null;
+  // Additive (optional): why this suggestion (or lack of one) was made —
+  // most important for NEEDS_REVIEW/CANNOT_INFER, where there's no value
+  // to show and this is the only signal explaining the gap.
+  suggestionReasoning?: string | null;
   confidence: number | null;
   status: 'PENDING' | 'RESOLVED' | 'SKIPPED';
   finalValue: string | null;
@@ -153,6 +199,13 @@ export interface Issue {
   // reject actions operate on a suggestion id, not the issue id — null/undefined when
   // no suggestion exists yet for this issue.
   suggestionId?: string | null;
+  // Phase 4.10 (optional, additive): CorrectionSuggestionResponse.strategy —
+  // the specific evidence strategy that produced suggestedValue (e.g.
+  // "STRING_TEMPLATE"). Null for RULE_BASED suggestions and for AI
+  // suggestions where advanced inference didn't run.
+  suggestionStrategy?: string | null;
+  // Phase 4.10 (optional, additive): CorrectionSuggestionResponse.evidence_detail.
+  suggestionEvidence?: SuggestionEvidenceDetail | null;
 }
 
 export interface ApprovalRequestItem {
@@ -169,6 +222,14 @@ export interface ApprovalRequestItem {
   requestedAt: string;
   decidedCount: number;
   remainingCount: number;
+  // Additive (master/detail redesign): the real, unformatted ISO requested_at —
+  // for deterministic sorting (see src/data/workflowResolution.ts). `requestedAt`
+  // above is pre-formatted for display and must never be used for sorting.
+  requestedAtRaw?: string;
+  // Additive (master/detail redesign): real decided_at (falling back to
+  // updated_at, then requested_at) for the Approval Center master's "Updated"
+  // column — never fabricated when the request hasn't been decided yet.
+  updatedAt?: string;
 }
 
 export interface SchemaNode {
@@ -233,6 +294,12 @@ export interface ValidationRun {
   warningRows: number;
   failedRows: number;
   qualityScore: number | null;
+  // Additive: distinguishes "0 rules evaluated, trivially 100%" from
+  // "N rules evaluated, genuinely all passed" — see ValidationRunResponse
+  // in api/client.ts for why this exists. Optional so existing mock data
+  // stays valid; treated as 0/false when absent.
+  rulesEvaluatedCount?: number;
+  noApplicableRules?: boolean;
   startedAt: string;
   completedAt: string;
   durationMs: number | null;
@@ -240,6 +307,28 @@ export interface ValidationRun {
   // generic job-cancel endpoint.
   jobId?: string | null;
 }
+
+// Staging & Publish dataset-centric redesign (UI phase, no new backend fields):
+// a dataset-level workflow status derived client-side from whatever real signals
+// are available for it (its review run's status, its approval decision, and — only
+// for the currently-open dataset, since there is no list-staging-runs-by-dataset
+// endpoint — its staging/publish run status). See
+// src/data/datasetStagingWorkflow.ts's deriveDatasetStagingStatus for exactly how
+// each value is inferred, and its own comments for where a value is a real signal
+// vs. an honest "we can't tell yet" default.
+export type DatasetStagingStatus =
+  | 'DRAFT'
+  | 'IN_REVIEW'
+  | 'READY_FOR_APPROVAL'
+  | 'APPROVED'
+  | 'READY_TO_STAGE'
+  | 'STAGING'
+  | 'STAGED'
+  | 'FAILED'
+  // Phase 4.12B — a materialization job was cooperatively cancelled
+  // (materialization_phase = 'CANCELLED'); distinct from FAILED.
+  | 'CANCELLED'
+  | 'NO_APPROVED_CHANGES';
 
 export interface StagingRun {
   id: string;

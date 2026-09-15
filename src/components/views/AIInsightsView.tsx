@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AISuggestionItem, Issue, NavScreen, ReviewRun, ValidationRun } from '../../types';
+import { Select } from '../ui/Select';
 
 interface AIInsightsViewProps {
   onNavigate: (screen: NavScreen) => void;
@@ -103,18 +104,15 @@ export const AIInsightsView: React.FC<AIInsightsViewProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* Explanation */}
           <div className="flex items-center gap-2">
-            <select
+            <Select
               value={selectedIssueId}
-              onChange={(e) => setSelectedIssueId(e.target.value)}
-              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-2.5 py-2 text-xs text-on-surface"
-            >
-              <option value="">Select an issue…</option>
-              {issues.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.columnName} — {i.recordRef}
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedIssueId}
+              options={issues.map((i) => ({ value: i.id, label: `${i.columnName} — ${i.recordRef}` }))}
+              placeholder="Select an issue…"
+              aria-label="Issue"
+              size="sm"
+              fullWidth
+            />
             <button
               onClick={() => selectedIssueId && onGenerateExplanation(selectedIssueId)}
               disabled={isBusy || !selectedIssueId}
@@ -126,18 +124,15 @@ export const AIInsightsView: React.FC<AIInsightsViewProps> = ({
 
           {/* Run Summary */}
           <div className="flex items-center gap-2">
-            <select
+            <Select
               value={selectedValidationRunId}
-              onChange={(e) => setSelectedValidationRunId(e.target.value)}
-              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-2.5 py-2 text-xs text-on-surface"
-            >
-              <option value="">Select a validation run…</option>
-              {validationRuns.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.datasetName} — {r.startedAt}
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedValidationRunId}
+              options={validationRuns.map((r) => ({ value: r.id, label: `${r.datasetName} — ${r.startedAt}` }))}
+              placeholder="Select a validation run…"
+              aria-label="Validation run"
+              size="sm"
+              fullWidth
+            />
             <button
               onClick={() => selectedValidationRunId && onGenerateRunSummary(selectedValidationRunId)}
               disabled={isBusy || !selectedValidationRunId}
@@ -149,18 +144,15 @@ export const AIInsightsView: React.FC<AIInsightsViewProps> = ({
 
           {/* Prioritization */}
           <div className="flex items-center gap-2">
-            <select
+            <Select
               value={selectedReviewRunId}
-              onChange={(e) => setSelectedReviewRunId(e.target.value)}
-              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-2.5 py-2 text-xs text-on-surface"
-            >
-              <option value="">Select a review…</option>
-              {reviewRuns.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name}
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedReviewRunId}
+              options={reviewRuns.map((r) => ({ value: r.id, label: r.name }))}
+              placeholder="Select a review…"
+              aria-label="Review run"
+              size="sm"
+              fullWidth
+            />
             <button
               onClick={() => selectedReviewRunId && onGeneratePrioritization(selectedReviewRunId)}
               disabled={isBusy || !selectedReviewRunId}
@@ -172,18 +164,15 @@ export const AIInsightsView: React.FC<AIInsightsViewProps> = ({
 
           {/* Cluster */}
           <div className="flex items-center gap-2">
-            <select
+            <Select
               value={selectedReviewRunId}
-              onChange={(e) => setSelectedReviewRunId(e.target.value)}
-              className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-2.5 py-2 text-xs text-on-surface"
-            >
-              <option value="">Select a review…</option>
-              {reviewRuns.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name}
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedReviewRunId}
+              options={reviewRuns.map((r) => ({ value: r.id, label: r.name }))}
+              placeholder="Select a review…"
+              aria-label="Review run"
+              size="sm"
+              fullWidth
+            />
             <button
               onClick={() => selectedReviewRunId && onGenerateCluster(selectedReviewRunId)}
               disabled={isBusy || !selectedReviewRunId}
@@ -195,18 +184,15 @@ export const AIInsightsView: React.FC<AIInsightsViewProps> = ({
         </div>
 
         <div className="pt-3 border-t border-surface-container flex items-center gap-2">
-          <select
+          <Select
             value={selectedReviewRunId}
-            onChange={(e) => setSelectedReviewRunId(e.target.value)}
-            className="flex-1 bg-surface-container-low border border-outline-variant rounded-md px-2.5 py-2 text-xs text-on-surface"
-          >
-            <option value="">Select a review…</option>
-            {reviewRuns.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name}
-              </option>
-            ))}
-          </select>
+            onChange={setSelectedReviewRunId}
+            options={reviewRuns.map((r) => ({ value: r.id, label: r.name }))}
+            placeholder="Select a review…"
+            aria-label="Review run"
+            size="sm"
+            fullWidth
+          />
           <button
             onClick={() => selectedReviewRunId && onGenerateCorrections(selectedReviewRunId)}
             disabled={isBusy || !selectedReviewRunId}

@@ -1,4 +1,4 @@
-import { User } from '../types';
+import { SuggestionEvidenceDetail, User } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
 
@@ -663,6 +663,14 @@ export interface ValidationRunResponse {
   // siblings in the Reports effect that already got the Number() treatment —
   // fixed there too. Number() wherever used numerically.
   quality_score: string | null;
+  // Number of enabled RuleAssignments the worker actually resolved and
+  // evaluated for this run (never the count of Rule rows that exist, and
+  // never the count of ACTIVE rules) — this is what lets the UI tell
+  // "0 rules evaluated, trivially 100%" apart from "N rules evaluated,
+  // genuinely all passed". no_applicable_rules is a derived convenience
+  // flag: true whenever rules_evaluated_count === 0.
+  rules_evaluated_count: number;
+  no_applicable_rules: boolean;
   error_message: string | null;
   triggered_by: string | null;
   started_at: string | null;
@@ -712,6 +720,7 @@ export interface ValidationFailureResponse {
   rule_id: string;
   rule_name: string;
   rule_type: string;
+  rule_origin: string;
   assignment_scope: string;
   column_id: string | null;
   column_name: string | null;
@@ -735,6 +744,32 @@ export interface ListValidationFailuresQuery {
   rule_assignment_id?: string;
   page?: number;
   page_size?: number;
+}
+
+// GET /validation-runs/{id}/evaluated-rules — the RuleAssignments actually
+// resolved and evaluated for this run, with real names/columns/origin, so
+// the UI can prove rules_evaluated_count corresponds to concrete rules —
+// including ones that produced zero failures and therefore never appear in
+// /failures.
+export interface EvaluatedRuleResponse {
+  rule_assignment_id: string;
+  rule_id: string;
+  rule_name: string;
+  rule_type: string;
+  rule_origin: string;
+  assignment_scope: string;
+  column_id: string | null;
+  column_name: string | null;
+  severity: string;
+}
+
+export interface EvaluatedRuleListResponse {
+  items: EvaluatedRuleResponse[];
+  total: number;
+}
+
+export function listEvaluatedRules(validationRunId: string): Promise<EvaluatedRuleListResponse> {
+  return apiRequest(`/validation-runs/${validationRunId}/evaluated-rules`);
 }
 
 export function listValidationFailures(
@@ -963,12 +998,24 @@ export interface CorrectionSuggestionResponse {
   // coercion, unlike `+`), but mistyped nonetheless. Number() wherever used
   // numerically — fixed at the mapping boundary in App.tsx.
   confidence: string;
+  // DETERMINISTIC (rule-based generators) / AI_HIGH_CONFIDENCE / NEEDS_REVIEW
+  // (AI has partial signal but won't guess a value) / CANNOT_INFER (no
+  // usable signal, or the AI call itself failed). NEEDS_REVIEW/CANNOT_INFER
+  // always pair with suggested_value === "" — never a fabricated value.
+  category: 'DETERMINISTIC' | 'AI_HIGH_CONFIDENCE' | 'NEEDS_REVIEW' | 'CANNOT_INFER';
   fix_type: string;
   reasoning: string | null;
   is_selected: boolean;
   selected_by: string | null;
   selected_at: string | null;
   created_at: string;
+  // Additive (Phase 4.10 backend schema exposure — app/modules/review/schemas.py):
+  // both columns already existed and were already populated for AI suggestions
+  // where advanced inference ran (Phase 4.1/4.5), just never serialized before.
+  // Null for RULE_BASED suggestions and for AI suggestions predating/without
+  // advanced inference.
+  strategy: string | null;
+  evidence_detail: SuggestionEvidenceDetail | null;
 }
 
 export interface GenerateSuggestionsResponse {
@@ -1073,6 +1120,48 @@ export function correctIssue(issueId: string, input: CorrectIssueRequest): Promi
   return apiRequest(`/issues/${issueId}/correct`, { method: 'POST', body: input });
 }
 
+// --- AI Trace (Phase 4.9 backend / Phase 4.10 frontend) ---------------------
+// Read-only audit trace for one correction suggestion — never invokes AI,
+// never returns raw prompt body/raw model response/credentials (confirmed
+// via AITraceService's own docstring). Gated review.read, same as the
+// issues/suggestions this augments.
+
+export interface AITracePromptResponse {
+  id: string;
+  key: string;
+  version_number: number;
+}
+
+export interface AITraceUsageEntryResponse {
+  id: string;
+  provider: string;
+  model: string;
+  prompt_version_id: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  latency_ms: number | null;
+  /** "SUCCESS" | "FAILED" — derived server-side from token presence, never stored/fabricated. */
+  status: string;
+  created_at: string;
+}
+
+export interface AITraceResponse {
+  correction_suggestion_id: string;
+  ai_suggestion_id: string | null;
+  is_llm_backed: boolean;
+  /** "OK" | "NO_AI_CALL" | "BROKEN_LINKAGE" */
+  linkage_status: string;
+  provider: string | null;
+  model: string | null;
+  prompt: AITracePromptResponse | null;
+  usage: AITraceUsageEntryResponse[];
+}
+
+export function getSuggestionAiTrace(suggestionId: string): Promise<AITraceResponse> {
+  return apiRequest(`/suggestions/${suggestionId}/ai-trace`);
+}
+
 // --- Approval ------------------------------------------------------------
 
 export interface ApprovalRequestResponse {
@@ -1143,6 +1232,35 @@ export interface StagingRunResponse {
   completed_at: string | null;
   created_at: string;
   updated_at: string | null;
+
+  // Phase 4.12 — real materialized staging dataset progress (app/modules/
+  // staging/schemas.py StagingRunResponse). All null/0 for a historical
+  // (pre-4.12) run or one whose synchronous audit-layer build itself failed
+  // (no materialization job was ever dispatched for it) — destination_table
+  // being null is the backend's own single authoritative "not materialized
+  // yet" signal (see StagingRunNotMaterializedError), deliberately not a
+  // separate boolean. `status` above is UNCHANGED in meaning — it still
+  // reflects only the affected-record audit-layer build; materialization
+  // progress lives entirely in these fields, an orthogonal dimension.
+  destination_schema: string | null;
+  destination_table: string | null;
+  source_row_count: number | null;
+  materialized_row_count: number | null;
+  copied_row_count: number;
+  /** One of PREPARING_SCHEMA | CREATING_TABLE | COPYING_SOURCE | APPLYING_CORRECTIONS | VALIDATING | FINALIZING | READY | FAILED | CANCELLED, or null before the async job has started. */
+  materialization_phase: string | null;
+  progress_percentage: number | null;
+  materialization_error: string | null;
+}
+
+// A per-record correction (app/modules/staging/record_builder.py's
+// build_corrected_fields) — the original vs. staged value for one column,
+// traceable back to the issue that produced it.
+export interface StagingCorrectedFieldEntry {
+  column_name: string | null;
+  original_value: string | null;
+  final_value: string;
+  issue_id: string;
 }
 
 export interface StagingRecordResponse {
@@ -1150,7 +1268,7 @@ export interface StagingRecordResponse {
   staging_run_id: string;
   record_ref: string;
   row_snapshot: Record<string, unknown>;
-  corrected_fields: unknown[];
+  corrected_fields: StagingCorrectedFieldEntry[];
   source_row_hash_at_validation: string;
   source_row_hash_at_staging: string | null;
   source_drift_status: string;
@@ -1171,6 +1289,100 @@ export function listStagingRecords(
   query: { drift_only?: boolean } = {}
 ): Promise<StagingRecordResponse[]> {
   return apiRequest(`/staging-runs/${stagingRunId}/records${buildQuery(query)}`);
+}
+
+// --- Materialized staging dataset (Phase 4.12) -------------------------------
+// The physical, DataCraft-owned staging_data.<table> copy of the whole source
+// dataset with approved corrections applied — distinct from StagingRecordResponse
+// above, which is only the affected-row audit trail. Both endpoints raise 409
+// STAGING_RUN_NOT_MATERIALIZED (see ApiError.code) for a historical/pre-4.12 run
+// or one whose materialization job hasn't reached CREATING_TABLE yet — never a
+// generic 500, so callers can distinguish "genuinely not ready" from a real failure.
+
+export interface StagingDestinationColumn {
+  name: string;
+  normalized_data_type: string;
+  staging_data_type: string;
+}
+
+export interface StagingDestinationResponse {
+  staging_run_id: string;
+  destination_schema: string;
+  destination_table: string;
+  columns: StagingDestinationColumn[];
+  source_row_count: number | null;
+  materialized_row_count: number | null;
+  copied_row_count: number;
+  materialization_phase: string | null;
+  progress_percentage: number | null;
+  approved_correction_count: number;
+  affected_row_count: number;
+}
+
+export function getStagingDestination(stagingRunId: string): Promise<StagingDestinationResponse> {
+  return apiRequest(`/staging-runs/${stagingRunId}/destination`);
+}
+
+// A per-row corrected field, as returned inline on a materialized preview row
+// (app/modules/staging/schemas.py MaterializedPreviewRow.corrected_fields is a
+// plain list[dict[str, Any]] on the backend, not a typed sub-model — shaped the
+// same as StagingCorrectedFieldEntry above by convention, typed loosely to match).
+export interface MaterializedPreviewCorrectedField {
+  column_name: string | null;
+  original_value: string | null;
+  final_value: string;
+  issue_id: string;
+}
+
+export interface MaterializedPreviewRow {
+  values: Record<string, unknown>;
+  /** Null only for a ROW_INDEX_FALLBACK dataset (no reliable key) — ambient row order, not a stable identity. */
+  record_ref: string | null;
+  is_changed: boolean;
+  corrected_fields: MaterializedPreviewCorrectedField[];
+}
+
+export interface MaterializedPreviewResponse {
+  columns: string[];
+  rows: MaterializedPreviewRow[];
+  total_rows: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface GetStagingPreviewQuery {
+  filter?: 'ALL' | 'CHANGED' | 'UNCHANGED';
+  limit?: number;
+  offset?: number;
+}
+
+export function getStagingPreview(
+  stagingRunId: string,
+  query: GetStagingPreviewQuery = {}
+): Promise<MaterializedPreviewResponse> {
+  return apiRequest(`/staging-runs/${stagingRunId}/preview${buildQuery(query)}`);
+}
+
+// --- Staged Revalidation (Phase 4.8 backend / Phase 4.10 frontend) ---------
+// Computed fresh on every call — never persisted, never queries the live
+// source. Gated staging.read, same as the records this augments. Callers
+// should fetch this lazily (e.g. on row expand), never for every record on
+// initial page load — there is no bulk/batched variant.
+
+export interface StagedRuleRevalidationResponse {
+  rule_assignment_id: string;
+  rule_id: string;
+  rule_type: string;
+  column_name: string | null;
+  /** "REVALIDATED_PASS" | "REVALIDATED_FAIL" | "REQUIRES_DATASET_REVALIDATION" */
+  status: string;
+  reason: string | null;
+  checked_value: unknown;
+}
+
+export function getStagingRecordRevalidation(stagingRecordId: string): Promise<StagedRuleRevalidationResponse[]> {
+  return apiRequest(`/staging-records/${stagingRecordId}/revalidation`);
 }
 
 // --- Publishing ----------------------------------------------------------

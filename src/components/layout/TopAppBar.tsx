@@ -19,6 +19,13 @@ interface TopAppBarProps {
   onSearchChange: (q: string) => void;
   onToggleMobileNav?: () => void;
   onOpenAIAssistant: () => void;
+  // V1.0 global operation visibility — count of meaningful background jobs
+  // (validation, AI rule/correction generation, staging materialization)
+  // currently running anywhere in the app, independent of which screen the
+  // user is on. Hidden entirely when 0, so it never adds clutter to the
+  // common case.
+  activeOperationsCount: number;
+  onOpenRunningOperations: () => void;
 }
 
 export const TopAppBar: React.FC<TopAppBarProps> = ({
@@ -34,6 +41,8 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
   onSearchChange,
   onToggleMobileNav,
   onOpenAIAssistant,
+  activeOperationsCount,
+  onOpenRunningOperations,
 }) => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -166,6 +175,19 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
 
       {/* Right side: Notifications, AI Assistant, User Profile */}
       <div className="flex items-center gap-2 md:gap-3 ml-4">
+        {/* Global running-operations indicator — only rendered when something
+            is actually running, so it never crowds the common case. */}
+        {activeOperationsCount > 0 && (
+          <button
+            onClick={onOpenRunningOperations}
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary-fixed text-on-secondary-fixed text-[11px] font-semibold hover:opacity-90 transition-opacity cursor-pointer"
+            title="View running operations in Run History"
+          >
+            <span className="w-3.5 h-3.5 border-2 border-on-secondary-fixed/40 border-t-on-secondary-fixed rounded-full animate-spin" />
+            {activeOperationsCount} {activeOperationsCount === 1 ? 'process' : 'processes'} running
+          </button>
+        )}
+
         {/* Notifications */}
         <div className="relative">
           <button

@@ -12,6 +12,14 @@ interface DatasetPreviewViewProps {
   preview: DatasetPreviewResponse | null;
   previewLoading: boolean;
   previewError: string | null;
+  /**
+   * Rendered as a tab's content inside DatasetOverviewView instead of its own
+   * full page — skips this component's own breadcrumb/title header (the
+   * host page already has one above its tab bar) and page padding, so
+   * "Preview Table" behaves like the Overview/Quality Rules/Pending Approvals
+   * tabs (switches in place) instead of navigating away.
+   */
+  embedded?: boolean;
 }
 
 export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
@@ -22,6 +30,7 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
   preview,
   previewLoading,
   previewError,
+  embedded = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -52,54 +61,58 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
     document.body.removeChild(link);
   };
 
+  const exportButton =
+    !connectionInactive && canViewPreview && preview ? (
+      <button
+        onClick={handleExportCSV}
+        className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer shrink-0"
+      >
+        <span className="material-symbols-outlined text-base">download</span>
+        <span>Export CSV</span>
+      </button>
+    ) : null;
+
   return (
-    <div className="p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-300">
-      {/* Header Section */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-outline-variant pb-6">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-outline mb-2 font-sans">
-            <button
-              onClick={() => onNavigate('dataset-overview')}
-              className="hover:text-primary transition-colors cursor-pointer"
-            >
-              {datasetName ?? 'Dataset'}
-            </button>
-            <span>/</span>
-            <span className="text-on-surface font-bold">Table Preview</span>
-          </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
-              {datasetName ?? 'Dataset'} Preview
-            </h1>
-            {connectionInactive && (
-              <span
-                className="bg-secondary-fixed text-on-secondary-fixed text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full"
-                title="This dataset's underlying connection has been deactivated. Informational only — preview still works normally."
+    <div className={embedded ? 'space-y-6' : 'p-6 md:p-10 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-300'}>
+      {/* Header Section — skipped when embedded as a DatasetOverviewView tab,
+          which already has its own breadcrumb/title above the tab bar. */}
+      {!embedded && (
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-outline-variant pb-6">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-outline mb-2 font-sans">
+              <button
+                onClick={() => onNavigate('dataset-overview')}
+                className="hover:text-primary transition-colors cursor-pointer"
               >
-                Connection Inactive
-              </span>
+                {datasetName ?? 'Dataset'}
+              </button>
+              <span>/</span>
+              <span className="text-on-surface font-bold">Table Preview</span>
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 className="font-editorial text-3xl md:text-4xl font-bold text-on-surface tracking-tight">
+                {datasetName ?? 'Dataset'} Preview
+              </h1>
+              {connectionInactive && (
+                <span
+                  className="bg-secondary-fixed text-on-secondary-fixed text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full"
+                  title="This dataset's underlying connection has been deactivated. Informational only — preview still works normally."
+                >
+                  Connection Inactive
+                </span>
+              )}
+            </div>
+            {preview && !connectionInactive && (
+              <p className="text-xs text-outline mt-1 font-sans">
+                Live read from <code className="font-mono bg-surface-container px-1.5 py-0.5 rounded text-on-surface">{preview.schema_name}.{preview.table_name}</code>
+                {preview.capped_to_max && ' — capped to the server-enforced maximum row count'}.
+              </p>
             )}
           </div>
-          {preview && !connectionInactive && (
-            <p className="text-xs text-outline mt-1 font-sans">
-              Live read from <code className="font-mono bg-surface-container px-1.5 py-0.5 rounded text-on-surface">{preview.schema_name}.{preview.table_name}</code>
-              {preview.capped_to_max && ' — capped to the server-enforced maximum row count'}.
-            </p>
-          )}
-        </div>
 
-        {!connectionInactive && canViewPreview && preview && (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleExportCSV}
-              className="flex items-center gap-2 bg-primary hover:bg-primary-container text-white px-5 py-2.5 rounded-md font-medium text-xs transition-all shadow-ambient active:scale-[0.98] cursor-pointer"
-            >
-              <span className="material-symbols-outlined text-base">download</span>
-              <span>Export CSV</span>
-            </button>
-          </div>
-        )}
-      </div>
+          <div className="flex items-center gap-3">{exportButton}</div>
+        </div>
+      )}
 
       {connectionInactive ? (
         <div className="flex items-center justify-center py-20">
@@ -138,18 +151,22 @@ export const DatasetPreviewView: React.FC<DatasetPreviewViewProps> = ({
         </div>
       ) : (
         <>
-          {/* Search */}
-          <div className="relative w-full sm:w-72">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-base">
-              search
-            </span>
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Filter across all columns..."
-              className="w-full bg-surface-container-low border border-outline-variant rounded-md pl-9 pr-3 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary transition-colors"
-            />
+          {/* Search (+ Export CSV inline when embedded, since the header that
+              normally hosts it is skipped) */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="relative w-full sm:w-72">
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-base">
+                search
+              </span>
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Filter across all columns..."
+                className="w-full bg-surface-container-low border border-outline-variant rounded-md pl-9 pr-3 py-2 text-xs text-on-surface placeholder-outline focus:outline-none focus:bg-white focus:border-primary transition-colors"
+              />
+            </div>
+            {embedded && exportButton}
           </div>
 
           {/* Main Table Card */}

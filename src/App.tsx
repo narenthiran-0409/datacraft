@@ -1,4 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { resolveScreen, SCREEN_TO_PATH } from './routing';
 import {
   NavScreen,
   User,
@@ -20,6 +22,7 @@ import {
   ApprovalMetricsSummary,
   AISuggestionItem,
   AppSettings,
+  DatasetStagingStatus,
 } from './types';
 import {
   bootstrapSession,
@@ -77,7 +80,6 @@ import {
   // Rules
   listRules,
   createRule as apiCreateRule,
-  updateRule as apiUpdateRule,
   listRuleVersions,
   createRuleVersion as apiCreateRuleVersion,
   listRuleAssignments,
@@ -100,6 +102,8 @@ import {
   listValidationFailures,
   ValidationFailureResponse,
   ValidationFailureListResponse,
+  listEvaluatedRules,
+  EvaluatedRuleResponse,
   // Jobs
   cancelJob as apiCancelJob,
   getJob as apiGetJob,
@@ -119,6 +123,8 @@ import {
   ReviewRunResponse,
   IssueResponse,
   CorrectionSuggestionResponse,
+  getSuggestionAiTrace,
+  AITraceResponse,
   // Approval
   listApprovals,
   submitApproval as apiSubmitApproval,
@@ -127,9 +133,16 @@ import {
   ApprovalRequestResponse,
   // Staging
   createStagingRun as apiCreateStagingRun,
+  getStagingRun,
   listStagingRecords,
+  getStagingRecordRevalidation,
+  getStagingDestination,
+  getStagingPreview,
   StagingRunResponse,
   StagingRecordResponse,
+  StagedRuleRevalidationResponse,
+  StagingDestinationResponse,
+  MaterializedPreviewResponse,
   // Publishing
   triggerPublish as apiTriggerPublish,
   acknowledgeDrift as apiAcknowledgeDrift,
@@ -154,12 +167,85 @@ import { DataProfilingView } from './components/views/DataProfilingView';
 import { ValidationWorkspaceView } from './components/views/ValidationWorkspaceView';
 import { ValidationRunDetailsView } from './components/views/ValidationRunDetailsView';
 import { StagingPublishView } from './components/views/StagingPublishView';
+import { PreviewColumn, PreviewRow, RowFilter } from './components/dataset-workflow/ChangePreviewTable';
+import { TableStructureColumn } from './components/dataset-workflow/StagingConfirmationModal';
+import { WorkflowBreadcrumb } from './components/dataset-workflow/WorkflowBreadcrumb';
+import { Select } from './components/ui/Select';
+import {
+  PENDING_STAGING_DESTINATION,
+  deriveDatasetStagingStatus,
+  findMatchingPreviewRow,
+  humanizeEnum,
+  isTerminalMaterializationPhase,
+  resolveMaterializationUiPhase,
+  stagingDestinationFromRun,
+  MaterializationUiPhase,
+} from './data/datasetStagingWorkflow';
+import {
+  getApprovalForReview,
+  getCurrentReviewForDataset,
+  getPendingReviewRulesForDataset,
+  getRelevantApprovalForDataset,
+  getReviewsForDataset,
+  getStagingEligibleReview,
+} from './data/workflowResolution';
+import { ValidationMasterView, ValidationMasterRow, ValidationMasterStatus } from './components/views/ValidationMasterView';
+import { QualityRulesMasterView, RulesMasterRow, RulesMasterStatus } from './components/views/QualityRulesMasterView';
+import {
+  ReviewCorrectionsMasterView,
+  ReviewMasterRow,
+  ReviewMasterStatus,
+} from './components/views/ReviewCorrectionsMasterView';
+import {
+  ApprovalCenterMasterView,
+  ApprovalMasterRow,
+  ApprovalMasterStatus,
+} from './components/views/ApprovalCenterMasterView';
+import { StagingMasterView, StagingMasterRow } from './components/views/StagingMasterView';
 import { DataLineageView } from './components/views/DataLineageView';
 import { RunHistoryView } from './components/views/RunHistoryView';
 import { ReportsView } from './components/views/ReportsView';
 import { AIInsightsView } from './components/views/AIInsightsView';
 import { UserManagementView } from './components/views/UserManagementView';
 import { SettingsView } from './components/views/SettingsView';
+
+// V1.0 UX polish — the one reusable toast/snackbar shape used for every
+// acknowledgement (started/completed/failed) across the app. `action` is
+// optional: only meaningful async operations with an obvious result
+// destination (View Results, View Staged Dataset, ...) get one.
+export type ToastVariant = 'success' | 'error' | 'info' | 'warning';
+
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+interface ToastState {
+  message: string;
+  variant: ToastVariant;
+  action?: ToastAction;
+}
+
+interface ToastOptions {
+  variant?: ToastVariant;
+  action?: ToastAction;
+  /** Defaults to 7s when an action CTA is present (needs time to read + click), else 4s. */
+  durationMs?: number;
+}
+
+const TOAST_ICON: Record<ToastVariant, string> = {
+  success: 'check_circle',
+  error: 'error',
+  warning: 'warning',
+  info: 'info',
+};
+
+const TOAST_STYLES: Record<ToastVariant, string> = {
+  success: 'bg-primary text-white border-primary-container',
+  error: 'bg-error text-white border-error',
+  warning: 'bg-secondary-fixed text-on-secondary-fixed border-secondary',
+  info: 'bg-primary text-white border-primary-container',
+};
 
 // Shared loading/error presentation for the real-data screens below — mirrors the
 // full-page spinner already used for session bootstrap and the error-banner style
@@ -247,6 +333,8 @@ function mapValidationRun(vr: ValidationRunResponse, datasetName: string): Valid
     // on the wire — passed through unconverted here, unlike its siblings in the
     // Reports effect that already got the Number() treatment.
     qualityScore: vr.quality_score !== null ? Number(vr.quality_score) : null,
+    rulesEvaluatedCount: vr.rules_evaluated_count,
+    noApplicableRules: vr.no_applicable_rules,
     startedAt: formatDateTime(vr.started_at),
     completedAt: vr.completed_at ? formatDateTime(vr.completed_at) : 'Not completed',
     durationMs: vr.duration_ms,
@@ -258,7 +346,8 @@ function mapReviewRun(
   rr: ReviewRunResponse,
   datasetName: string,
   totalIssues: number,
-  resolvedIssues: number
+  resolvedIssues: number,
+  datasetId?: string
 ): ReviewRun {
   return {
     id: rr.id,
@@ -269,6 +358,9 @@ function mapReviewRun(
     totalIssues,
     resolvedIssues,
     createdAt: formatDateTime(rr.created_at),
+    datasetId,
+    createdAtRaw: rr.created_at,
+    updatedAt: formatDateTime(rr.updated_at ?? rr.created_at),
   };
 }
 
@@ -294,6 +386,8 @@ function mapApprovalRequest(
     decidedCount: isTerminal ? ar.affected_issue_count : 0,
     remainingCount: isTerminal ? 0 : ar.affected_issue_count,
     reviewRunId: ar.review_run_id,
+    requestedAtRaw: ar.requested_at,
+    updatedAt: formatDateTime(ar.decided_at ?? ar.updated_at ?? ar.requested_at),
   };
 }
 
@@ -355,7 +449,37 @@ function mapUserResponseToUser(u: UserResponse, roleById: Map<string, RoleRespon
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authStatus, setAuthStatus] = useState<'checking' | 'resolved'>('checking');
-  const [currentScreen, setCurrentScreen] = useState<NavScreen>('dashboard');
+
+  // Real URL routing (replaces the old `useState<NavScreen>('dashboard')`,
+  // which is the root cause of the "refresh returns to Dashboard" bug: the
+  // URL is now the single source of truth for which screen renders — see
+  // src/routing.ts. `currentScreen`/`routeDatasetId`/`routeRunId` are derived
+  // fresh from the URL on every render rather than stored, so a hard refresh,
+  // a pasted/bookmarked URL, and browser Back/Forward all reconstruct the
+  // exact same page with no dependence on prior in-memory React state.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { screen: currentScreen, params: routeParams } = useMemo(
+    () => resolveScreen(location.pathname),
+    [location.pathname]
+  );
+  const routeDatasetId = routeParams.datasetId ?? null;
+  const routeRunId = routeParams.runId ?? null;
+
+  // "/" has no page of its own. Waits for the session bootstrap to actually
+  // resolve before picking a destination — otherwise this fired while
+  // currentUser was still null (bootstrapSession is async), sent "/" to
+  // "/dashboard" unconditionally, and then the login check further below
+  // rendered LoginView there anyway: the address bar said /dashboard while
+  // the screen showed Welcome back. Authenticated -> /dashboard;
+  // unauthenticated -> /login, so the URL always matches what's on screen.
+  useEffect(() => {
+    if (location.pathname !== '/') return;
+    if (authStatus === 'checking') return;
+    navigate(currentUser ? '/dashboard' : '/login', { replace: true });
+  }, [location.pathname, navigate, authStatus, currentUser]);
+
   const [isMobileNavOpen, setIsMobileNavOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isChangingPassword, setIsChangingPassword] = useState(false);
@@ -378,7 +502,7 @@ export default function App() {
   useEffect(() => {
     return onSessionExpired(() => {
       setCurrentUser(null);
-      setCurrentScreen('login');
+      navigate('/login');
       triggerToast('Your session expired. Please sign in again.');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -488,8 +612,12 @@ export default function App() {
     null
   );
 
-  // Dataset Overview — selection comes from Data Explorer's "Open Dataset" action.
-  const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+  // Dataset Overview — selection comes from Data Explorer's "Open Dataset" action
+  // (or, now, directly from the URL — see routeDatasetId above). Every one of this
+  // app's five master/detail modules is dataset-centric (confirmed via each
+  // *MasterRow definition further below, all keyed by datasetId), so the same
+  // routeDatasetId serves as the "which dataset is open" identity everywhere.
+  const selectedDatasetId = routeDatasetId;
   const [selectedDataset, setSelectedDataset] = useState<DatasetResponse | null>(null);
   const [selectedDatasetColumns, setSelectedDatasetColumns] = useState<ColumnResponse[]>([]);
   const [datasetOverviewLoading, setDatasetOverviewLoading] = useState(false);
@@ -564,6 +692,9 @@ export default function App() {
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [rulesActionError, setRulesActionError] = useState<string | null>(null);
+  // Dataset-first Quality Rules page (this task): real dataset list for the
+  // picker, so it can show names instead of truncated RuleAssignment.dataset_id UUIDs.
+  const [qualityRulesDatasets, setQualityRulesDatasets] = useState<DatasetResponse[]>([]);
   const [isSavingRule, setIsSavingRule] = useState(false);
   const [isSavingAssignment, setIsSavingAssignment] = useState(false);
   // Whole-dataset rule detection + review workflow (this task)
@@ -579,9 +710,31 @@ export default function App() {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [validationActionError, setValidationActionError] = useState<string | null>(null);
   const [isTriggeringValidation, setIsTriggeringValidation] = useState(false);
+  // V1.0 — global operation visibility for a just-triggered validation run:
+  // watched independently of whatever screen is currently open, so its
+  // completion/failure toast (with a "View Results" CTA into the real run)
+  // still reaches the user even if they've navigated away. Cleared the
+  // moment the run reaches a terminal status.
+  const [watchedValidationRun, setWatchedValidationRun] = useState<{
+    runId: string;
+    datasetId: string;
+    datasetName: string;
+  } | null>(null);
+  // Master/detail redesign — bulk, per-dataset validation run history (newest
+  // first, matching the backend's own ordering) for the Validation and Review
+  // & Corrections master tables' "Quality Score" / "Last Validation" columns.
+  // No bulk "validation runs across datasets" endpoint exists, so this is a
+  // real N+1 fetch (one listValidationRuns per dataset) — see the effect below.
+  const [validationSummaryByDatasetId, setValidationSummaryByDatasetId] = useState<Record<string, ValidationRun[]>>(
+    {}
+  );
+  const [validationSummaryLoading, setValidationSummaryLoading] = useState(false);
+  // Guided pre-check modal shown when "Run Validation" is clicked for a
+  // dataset with zero enabled RuleAssignments (see handleRunValidation).
+  const [showNoRulesConfirm, setShowNoRulesConfirm] = useState(false);
 
-  // Validation Run Details
-  const [selectedValidationRunId, setSelectedValidationRunId] = useState<string | null>(null);
+  // Validation Run Details — real route param (/validation/:datasetId/runs/:runId).
+  const selectedValidationRunId = routeRunId;
   const [selectedValidationRun, setSelectedValidationRun] = useState<ValidationRun | null>(null);
   const [validationDetailLoading, setValidationDetailLoading] = useState(false);
   const [validationDetailError, setValidationDetailError] = useState<string | null>(null);
@@ -599,6 +752,14 @@ export default function App() {
   const [validationFailuresError, setValidationFailuresError] = useState<string | null>(null);
   const VALIDATION_FAILURES_PAGE_SIZE = 25;
 
+  // Validation Run Details — which rules were actually evaluated (real; GET
+  // /validation-runs/{id}/evaluated-rules), including ones that produced
+  // zero failures — proof that rulesEvaluatedCount corresponds to concrete,
+  // named rules rather than a bare number.
+  const [evaluatedRules, setEvaluatedRules] = useState<EvaluatedRuleResponse[]>([]);
+  const [evaluatedRulesLoading, setEvaluatedRulesLoading] = useState(false);
+  const [evaluatedRulesError, setEvaluatedRulesError] = useState<string | null>(null);
+
   // Review & Corrections
   const [reviewRuns, setReviewRuns] = useState<ReviewRun[]>([]);
   const [reviewRunsLoading, setReviewRunsLoading] = useState(false);
@@ -607,6 +768,13 @@ export default function App() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [reviewActionError, setReviewActionError] = useState<string | null>(null);
   const [reviewActionPendingIds, setReviewActionPendingIds] = useState<string[]>([]);
+
+  // AI Trace (Phase 4.10) — lazy-loaded per suggestion id, only when a user opens
+  // the "AI Details" section for a given issue's suggestion (never eagerly for
+  // every issue on the page — there is no bulk trace endpoint).
+  const [aiTraceBySuggestionId, setAiTraceBySuggestionId] = useState<Map<string, AITraceResponse>>(new Map());
+  const [aiTraceLoadingIds, setAiTraceLoadingIds] = useState<Set<string>>(new Set());
+  const [aiTraceErrorBySuggestionId, setAiTraceErrorBySuggestionId] = useState<Map<string, string>>(new Map());
 
   // Approval Center
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequestItem[]>([]);
@@ -621,15 +789,70 @@ export default function App() {
   const [stagingRecords, setStagingRecords] = useState<StagingRecordResponse[]>([]);
   const [driftOnlyFilter, setDriftOnlyFilter] = useState(false);
   const [currentPublishRun, setCurrentPublishRun] = useState<PublishRunResponse | null>(null);
-  const [stagingLoading, setStagingLoading] = useState(false);
-  const [stagingError, setStagingError] = useState<string | null>(null);
   const [stagingActionError, setStagingActionError] = useState<string | null>(null);
   const [isStagingActionPending, setIsStagingActionPending] = useState(false);
+
+  // Staged revalidation (Phase 4.10) — lazy-loaded per staging record id, only
+  // on row expand (never eagerly for every listed record — no bulk endpoint,
+  // and the record list can be large).
+  const [revalidationByRecordId, setRevalidationByRecordId] = useState<Map<string, StagedRuleRevalidationResponse[]>>(
+    new Map()
+  );
+  const [revalidationLoadingIds, setRevalidationLoadingIds] = useState<Set<string>>(new Set());
+  const [revalidationErrorByRecordId, setRevalidationErrorByRecordId] = useState<Map<string, string>>(new Map());
+
+  // Phase 4.12B — real materialized staging dataset. `justTriggeredStagingRunId`
+  // is this browser session's own disambiguating signal for a null
+  // materialization_phase (see resolveMaterializationUiPhase's own doc comment):
+  // set the instant WE create a run, so its transient pre-first-phase window
+  // reads as QUEUED (keep polling) rather than LEGACY (never fetched again).
+  const [justTriggeredStagingRunId, setJustTriggeredStagingRunId] = useState<string | null>(null);
+  // A transient "couldn't refresh status" condition from the poll itself —
+  // distinct from the run genuinely having FAILED (materialization_phase).
+  const [stagingPollError, setStagingPollError] = useState<string | null>(null);
+  // Guards the global staging completion/failure toast against re-firing for
+  // the same already-terminal run on a later remount/re-render.
+  const announcedStagingRunIdRef = useRef<string | null>(null);
+
+  const [isMaterializedPreviewOpen, setIsMaterializedPreviewOpen] = useState(false);
+  const [materializedDestination, setMaterializedDestination] = useState<StagingDestinationResponse | null>(null);
+  const [materializedDestinationLoading, setMaterializedDestinationLoading] = useState(false);
+  const [materializedDestinationError, setMaterializedDestinationError] = useState<string | null>(null);
+  const [materializedPreview, setMaterializedPreview] = useState<MaterializedPreviewResponse | null>(null);
+  const [materializedPreviewLoading, setMaterializedPreviewLoading] = useState(false);
+  const [materializedPreviewError, setMaterializedPreviewError] = useState<string | null>(null);
+  const [materializedPreviewFilter, setMaterializedPreviewFilter] = useState<RowFilter>('ALL');
+  const [materializedPreviewOffset, setMaterializedPreviewOffset] = useState(0);
+  const MATERIALIZED_PREVIEW_PAGE_SIZE = 25;
+
+  // Staging & Publish dataset-centric redesign — left explorer's own real
+  // connections/schemas/datasets fetch (independent of Data Explorer's own copy
+  // of this, so neither screen's loading/error state leaks into the other).
+  const [workflowCatalogConnections, setWorkflowCatalogConnections] = useState<ConnectionResponse[]>([]);
+  const [workflowCatalogSchemas, setWorkflowCatalogSchemas] = useState<SchemaResponse[]>([]);
+  const [workflowCatalogDatasets, setWorkflowCatalogDatasets] = useState<DatasetResponse[]>([]);
+  const [workflowCatalogLoading, setWorkflowCatalogLoading] = useState(false);
+  const [workflowCatalogError, setWorkflowCatalogError] = useState<string | null>(null);
+
+  // Master/detail redesign — each of the five workflow screens (Validation,
+  // Data Quality Rules, Review & Corrections, Approval Center, Staging &
+  // Publish) opens on its own full-width master list; drilling into a row
+  // means navigating to that module's `/:datasetId` route. Derived directly
+  // from the URL rather than stored: a module's detail view is open exactly
+  // when its own screen is current AND the URL carries a datasetId — no
+  // separate flag to fall out of sync with the address bar on refresh/back/
+  // forward. Navigating to a module's bare path (handleNavigate) naturally
+  // lands on its master list, matching the old reset-on-navigate behavior.
+  const isValidationDetailOpen = currentScreen === 'validation-workspace' && !!selectedDatasetId;
+  const isRulesDetailOpen = currentScreen === 'quality-rules' && !!selectedDatasetId;
+  const isReviewDetailOpen = currentScreen === 'review-corrections' && !!selectedDatasetId;
+  const isApprovalDetailOpen = currentScreen === 'approval-center' && !!selectedDatasetId;
+  const isStagingDetailOpen = currentScreen === 'staging-publish' && !!selectedDatasetId;
 
   // Modals & Drawers
   const [showRuleCreatorModal, setShowRuleCreatorModal] = useState<boolean>(false);
   const [showAICopilot, setShowAICopilot] = useState<boolean>(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   // AI Copilot State — real POST /ai/chat. conversation_id persists for the whole
   // session once the first real reply establishes one (server creates it when
@@ -678,11 +901,18 @@ export default function App() {
   const [versionFormError, setVersionFormError] = useState<string | null>(null);
   const [isSavingVersion, setIsSavingVersion] = useState(false);
 
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
+  // Single reusable toast — every triggerToast('...') call site (there are
+  // ~40) keeps working exactly as before (plain info-styled message, 4s);
+  // `options` is additive, only used by the operation-visibility feedback
+  // added for V1.0 (start/complete/fail acknowledgements with an optional
+  // destination CTA). One toast at a time, matching the app's existing
+  // "no notification stacking" behavior.
+  const triggerToast = (message: string, options: ToastOptions = {}) => {
+    const { variant = 'info', action, durationMs = action ? 7000 : 4000 } = options;
+    setToast({ message, variant, action });
     setTimeout(() => {
-      setToastMessage((prev) => (prev === msg ? null : prev));
-    }, 4000);
+      setToast((prev) => (prev?.message === message ? null : prev));
+    }, durationMs);
   };
 
   // Populates the dataset dropdown in the Assign Rule modal when it opens.
@@ -809,7 +1039,7 @@ export default function App() {
     if (!hasPermission('data_sources.read')) return;
     refreshDataSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // Data Explorer: GET schemas (per connection) + datasets, then columns per dataset.
   useEffect(() => {
@@ -901,12 +1131,14 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // Dataset Overview: GET dataset by id + its columns, for whichever dataset was
   // selected (from Data Explorer's "Open Dataset" action).
   useEffect(() => {
-    if (currentScreen !== 'dataset-overview') return;
+    // Also fetched for Staging & Publish (dataset-centric redesign) — its
+    // workspace header needs the same real row count/key strategy/columns.
+    if (currentScreen !== 'dataset-overview' && currentScreen !== 'staging-publish') return;
     if (!selectedDatasetId) return;
     if (!hasPermission('metadata.read')) return;
 
@@ -931,7 +1163,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedDatasetId]);
+  }, [currentScreen, selectedDatasetId, currentUser?.id]);
 
   // Dataset Overview's real quality-issues list (this task) — the top failures
   // from this dataset's most recent COMPLETED validation run, reusing the same
@@ -966,14 +1198,26 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedDatasetId, validationRuns]);
+  }, [currentScreen, selectedDatasetId, validationRuns, currentUser?.id]);
 
   // Data Preview tab (this task) — first real frontend consumer of
   // GET /datasets/{id}/preview, gated on data_preview.read (confirmed via
   // app/api/v1/datasets/routes.py). Live read against the actual source
   // database, never cached/re-derived client-side.
   useEffect(() => {
-    if (currentScreen !== 'dataset-preview') return;
+    // Also fetched for Staging & Publish (dataset-centric redesign) — the
+    // Preview Staging modal overlays real approved corrections onto these same
+    // real source rows rather than inventing a materialized staged table.
+    // Also fetched for Dataset Overview — its "Preview Table" tab now renders
+    // this same data embedded instead of navigating to the standalone
+    // 'dataset-preview' screen (kept around, unused, per instructions not to
+    // delete routes/components).
+    if (
+      currentScreen !== 'dataset-preview' &&
+      currentScreen !== 'staging-publish' &&
+      currentScreen !== 'dataset-overview'
+    )
+      return;
     if (!selectedDatasetId) return;
     if (!hasPermission('data_preview.read')) return;
 
@@ -995,7 +1239,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedDatasetId]);
+  }, [currentScreen, selectedDatasetId, currentUser?.id]);
 
   // Data Profiling: GET profile-runs (dataset-level history) + the dataset list for
   // the selector. Not wired: the POST that starts a new profiling run (out of scope).
@@ -1037,7 +1281,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // Data Lineage: GET the lineage graph rooted at whichever dataset is selected.
   useEffect(() => {
@@ -1092,7 +1336,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedDatasetId]);
+  }, [currentScreen, selectedDatasetId, currentUser?.id]);
 
   // Reports: the 5 real report endpoints only. No date-range picker exists in the UI
   // yet, so a fixed trailing-90-day window is used as a reasonable default.
@@ -1300,7 +1544,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // Run History: assembled client-side from validation-runs + profile-runs. There is
   // no list-all endpoint for staging-runs, publish-runs, or jobs anywhere in this
@@ -1355,7 +1599,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // --- Core decision workflow fetches (this batch) ----------------------------------
 
@@ -1391,20 +1635,57 @@ export default function App() {
 
   // Also fetched when landing on Dataset Overview (this task) — its Quality Rules
   // tab filters this exact same state down to the current dataset's assignments and
-  // PENDING_REVIEW rules, rather than duplicating a parallel fetch.
+  // PENDING_REVIEW rules, rather than duplicating a parallel fetch. Also fetched on
+  // Validation Workspace (this task) — handleRunValidation's zero-assignment
+  // pre-check reads this same `ruleAssignments` state, and Validation Workspace is
+  // reachable without ever visiting Dataset Overview first (e.g. the sidebar's
+  // "Validation" item), so it must not rely on a stale/empty list from a screen
+  // the user never opened.
   useEffect(() => {
-    if (currentScreen !== 'quality-rules' && currentScreen !== 'dataset-overview') return;
+    if (
+      currentScreen !== 'quality-rules' &&
+      currentScreen !== 'dataset-overview' &&
+      currentScreen !== 'validation-workspace'
+    )
+      return;
     if (!hasPermission('rules.read')) return;
     refreshRulesAndAssignments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
+
+  // Data Quality Rules is dataset-first (this task): real dataset names, not
+  // just the RuleAssignment.dataset_id already in `ruleAssignments`, so the
+  // dataset picker can show "Customers" instead of a truncated UUID.
+  useEffect(() => {
+    if (currentScreen !== 'quality-rules') return;
+    if (!hasPermission('metadata.read')) return;
+    let cancelled = false;
+    listDatasets({ page_size: 200 })
+      .then((resp) => {
+        if (!cancelled) setQualityRulesDatasets(resp.items);
+      })
+      .catch(() => {
+        if (!cancelled) setQualityRulesDatasets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentUser?.id]);
 
   // Validation Workspace: list validation runs for the selected dataset. Also
   // fetched when landing on Dataset Overview (this task) — the Overview tab
   // reuses this exact same state for its real quality/issue summary instead of
   // duplicating a parallel fetch.
   useEffect(() => {
-    if (currentScreen !== 'validation-workspace' && currentScreen !== 'dataset-overview') return;
+    // Also fetched for Staging & Publish (dataset-centric redesign) — its
+    // workspace header's "Last Validation" field uses this same real state.
+    if (
+      currentScreen !== 'validation-workspace' &&
+      currentScreen !== 'dataset-overview' &&
+      currentScreen !== 'staging-publish'
+    )
+      return;
     if (!selectedDatasetId) return;
     if (!hasPermission('metadata.read')) return;
 
@@ -1430,44 +1711,95 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedDatasetId]);
+  }, [currentScreen, selectedDatasetId, currentUser?.id]);
 
-  // Validation Run Details: real aggregate counts for the selected run.
+  // Master/detail redesign — bulk per-dataset validation history for the
+  // Validation master table and Review & Corrections master's "Validation"
+  // column. Runs once the shared workflow catalog's dataset list is loaded.
   useEffect(() => {
-    if (currentScreen !== 'validation-run-details') return;
-    if (!selectedValidationRunId) return;
+    if (currentScreen !== 'validation-workspace' && currentScreen !== 'review-corrections') return;
+    if (workflowCatalogDatasets.length === 0) return;
     if (!hasPermission('metadata.read')) return;
 
     let cancelled = false;
-    setValidationDetailLoading(true);
-    setValidationDetailError(null);
-    setValidationDetailActionError(null);
-
-    getValidationRun(selectedValidationRunId)
-      .then(async (vr) => {
+    setValidationSummaryLoading(true);
+    Promise.all(
+      workflowCatalogDatasets.map((d) =>
+        listValidationRuns({ dataset_id: d.id })
+          .then((runs) => [d.id, runs.map((r) => mapValidationRun(r, d.name))] as const)
+          .catch(() => [d.id, [] as ValidationRun[]] as const)
+      )
+    )
+      .then((entries) => {
         if (cancelled) return;
-        let datasetName = vr.dataset_id;
-        try {
-          const dataset = await getDataset(vr.dataset_id);
-          datasetName = dataset.name;
-        } catch {
-          // keep id fallback
-        }
-        if (cancelled) return;
-        setSelectedValidationRun(mapValidationRun(vr, datasetName));
-      })
-      .catch((err) => {
-        if (!cancelled) setValidationDetailError(extractErrorMessage(err));
+        const map: Record<string, ValidationRun[]> = {};
+        entries.forEach(([id, runs]) => {
+          map[id] = runs;
+        });
+        setValidationSummaryByDatasetId(map);
       })
       .finally(() => {
-        if (!cancelled) setValidationDetailLoading(false);
+        if (!cancelled) setValidationSummaryLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedValidationRunId]);
+  }, [currentScreen, workflowCatalogDatasets, currentUser?.id]);
+
+  // Validation Run Details: real aggregate counts for the selected run.
+  // Self-repeats every 2s while the fetched run is still QUEUED/RUNNING (the
+  // "contextual running indicator" requirement) — a user parked on this exact
+  // page for a still-in-progress run must see it reach COMPLETED/FAILED live,
+  // not only on a manual refresh. Stops the moment the run is terminal.
+  useEffect(() => {
+    if (currentScreen !== 'validation-run-details') return;
+    if (!selectedValidationRunId) return;
+    if (!hasPermission('metadata.read')) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let firstLoad = true;
+
+    const load = () => {
+      if (firstLoad) {
+        setValidationDetailLoading(true);
+        setValidationDetailError(null);
+        setValidationDetailActionError(null);
+      }
+      getValidationRun(selectedValidationRunId)
+        .then(async (vr) => {
+          if (cancelled) return;
+          let datasetName = vr.dataset_id;
+          try {
+            const dataset = await getDataset(vr.dataset_id);
+            datasetName = dataset.name;
+          } catch {
+            // keep id fallback
+          }
+          if (cancelled) return;
+          setSelectedValidationRun(mapValidationRun(vr, datasetName));
+          if (vr.status === 'QUEUED' || vr.status === 'RUNNING') {
+            timer = setTimeout(load, 2000);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setValidationDetailError(extractErrorMessage(err));
+        })
+        .finally(() => {
+          if (!cancelled) setValidationDetailLoading(false);
+          firstLoad = false;
+        });
+    };
+    load();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedValidationRunId, currentUser?.id]);
 
   // Validation Run Details' row-level failure detail — real, paginated, same
   // metadata.read gate as the run-details fetch above (this endpoint has no
@@ -1503,7 +1835,37 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen, selectedValidationRunId, validationFailuresPage, validationFailuresSeverity]);
+  }, [currentScreen, selectedValidationRunId, validationFailuresPage, validationFailuresSeverity, currentUser?.id]);
+
+  // Validation Run Details — the rules actually evaluated for this run
+  // (names/columns/origin), independent of the failure list above so
+  // rules that passed with zero failures are still visible as evidence
+  // rulesEvaluatedCount is real, not just a number.
+  useEffect(() => {
+    if (currentScreen !== 'validation-run-details') return;
+    if (!selectedValidationRunId) return;
+    if (!hasPermission('metadata.read')) return;
+
+    let cancelled = false;
+    setEvaluatedRulesLoading(true);
+    setEvaluatedRulesError(null);
+
+    listEvaluatedRules(selectedValidationRunId)
+      .then((resp) => {
+        if (!cancelled) setEvaluatedRules(resp.items);
+      })
+      .catch((err) => {
+        if (!cancelled) setEvaluatedRulesError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setEvaluatedRulesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, selectedValidationRunId, currentUser?.id]);
 
   // Reset failure-detail pagination/filter whenever a different run is opened.
   useEffect(() => {
@@ -1528,7 +1890,11 @@ export default function App() {
   // own review.read) — a review.read-only user without metadata.read still sees
   // every issue, just with the old truncated-id fallback instead of real names.
   useEffect(() => {
-    if (currentScreen !== 'review-corrections') return;
+    // Also fetched for Staging & Publish (dataset-centric redesign) — its left
+    // explorer needs every dataset's review status, and its Approved Changes
+    // card needs the real resolved Issue[] for whichever review a dataset maps
+    // to, both already produced by this exact fetch.
+    if (currentScreen !== 'review-corrections' && currentScreen !== 'staging-publish') return;
     if (!hasPermission('review.read')) return;
 
     let cancelled = false;
@@ -1548,7 +1914,7 @@ export default function App() {
             listReviewSuggestions(rr.id).catch(() => [] as CorrectionSuggestionResponse[]),
           ]);
           const datasetName = vr ? datasetNameById.get(vr.dataset_id) ?? vr.dataset_id : rr.validation_run_id;
-          return { rr, datasetName, issuesList, suggestionsList };
+          return { rr, datasetName, datasetId: vr?.dataset_id, issuesList, suggestionsList };
         })
       );
 
@@ -1571,7 +1937,7 @@ export default function App() {
 
       const mappedRuns: ReviewRun[] = [];
       const mappedIssues: Issue[] = [];
-      details.forEach(({ rr, datasetName, issuesList, suggestionsList }) => {
+      details.forEach(({ rr, datasetName, datasetId, issuesList, suggestionsList }) => {
         const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
         suggestionsList.forEach((s) => {
           suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
@@ -1594,6 +1960,8 @@ export default function App() {
             originalValue: issue.original_value ?? '',
             suggestedValue: suggestion?.suggested_value ?? null,
             suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+            suggestionCategory: suggestion ? ((suggestion.category as Issue['suggestionCategory']) ?? null) : null,
+            suggestionReasoning: suggestion?.reasoning ?? null,
             // BUG FIX (Decimal-serialization sweep): confidence is a Decimal-as-
             // string on the wire — parsed here rather than passed through.
             confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
@@ -1601,17 +1969,34 @@ export default function App() {
             finalValue: null,
             ruleTriggered: failure ? failure.rule_name : '—',
             suggestionId: suggestion?.id ?? null,
+            suggestionStrategy: suggestion?.strategy ?? null,
+            suggestionEvidence: suggestion?.evidence_detail ?? null,
           };
         });
         mappedIssues.push(...mapped);
 
         const resolvedCount = mapped.filter((i) => i.status !== 'PENDING').length;
-        mappedRuns.push(mapReviewRun(rr, datasetName, mapped.length, resolvedCount));
+        mappedRuns.push(mapReviewRun(rr, datasetName, mapped.length, resolvedCount, datasetId));
       });
 
       setReviewRuns(mappedRuns);
       setIssues(mappedIssues);
-      setSelectedReviewId((prev) => prev ?? mappedRuns[0]?.id ?? null);
+      // Auto-select only on Review & Corrections itself — Staging & Publish now
+      // drives selectedReviewId from the explorer's dataset selection instead
+      // (see handleSelectStagingDataset), so it must not be pre-empted here.
+      // Prefers the URL's own `?reviewId=` (a direct/bookmarked/refreshed link to
+      // a specific review) over "keep whatever was already selected" over "first
+      // in the list" — this is what makes a refresh on a specific review's URL
+      // land back on that same review instead of silently reverting to the first
+      // one in the dataset's list.
+      if (currentScreen === 'review-corrections') {
+        const fromUrl = searchParams.get('reviewId');
+        setSelectedReviewId((prev) => {
+          if (prev && mappedRuns.some((r) => r.id === prev)) return prev;
+          if (fromUrl && mappedRuns.some((r) => r.id === fromUrl)) return fromUrl;
+          return mappedRuns[0]?.id ?? null;
+        });
+      }
     })()
       .catch((err) => {
         if (!cancelled) setReviewRunsError(extractErrorMessage(err));
@@ -1624,7 +2009,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
   // Approval Center: list approvals, then resolve each one's review name, dataset name,
   // and requester display name (all real, via chained real endpoints). Also fetched
@@ -1632,7 +2017,14 @@ export default function App() {
   // this exact same resolved state down to the current dataset, by name (the
   // mapped ApprovalRequestItem carries no dataset id, only the resolved name).
   useEffect(() => {
-    if (currentScreen !== 'approval-center' && currentScreen !== 'dataset-overview') return;
+    // Also fetched for Staging & Publish (dataset-centric redesign) — its
+    // per-dataset status derivation needs each dataset's real approval decision.
+    if (
+      currentScreen !== 'approval-center' &&
+      currentScreen !== 'dataset-overview' &&
+      currentScreen !== 'staging-publish'
+    )
+      return;
     if (!hasPermission('approval.read')) return;
 
     let cancelled = false;
@@ -1675,20 +2067,133 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentScreen]);
+  }, [currentScreen, currentUser?.id]);
 
-  // Staging & Publish: there is no list/lookup-by-review endpoint for staging or
-  // publish runs (only get-by-id, and only once you already know the id) — so an
-  // existing staging run from an earlier session cannot be rediscovered here. State
-  // resets when the selected review changes and is populated only by this session's
-  // own create/publish actions, which is an honest reflection of that real gap.
+  // Staging & Publish: state resets when the user switches to a genuinely
+  // DIFFERENT review's workspace — stale staging/publish state from the
+  // previous dataset must never leak into the next one. Deliberately does
+  // NOT reset on the very first resolution of selectedReviewId (null -> a
+  // real id, which happens on every fresh mount/refresh while reviewRuns is
+  // still loading): the resume-from-URL effect right below this one needs to
+  // populate currentStagingRun from ?stagingRunId= on that same first mount,
+  // and this effect running after it in a later render would otherwise wipe
+  // it back out — a real ordering hazard once refresh-safety made "land
+  // directly on this page with a run already in progress" possible.
+  const prevSelectedReviewIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const prev = prevSelectedReviewIdRef.current;
+    prevSelectedReviewIdRef.current = selectedReviewId;
+    if (prev === null || selectedReviewId === null || prev === selectedReviewId) return;
     setCurrentStagingRun(null);
     setCurrentPublishRun(null);
     setStagingRecords([]);
-    setStagingError(null);
     setStagingActionError(null);
+    setRevalidationByRecordId(new Map());
+    setRevalidationLoadingIds(new Set());
+    setRevalidationErrorByRecordId(new Map());
+    setJustTriggeredStagingRunId(null);
+    setStagingPollError(null);
+    setIsMaterializedPreviewOpen(false);
+    setMaterializedDestination(null);
+    setMaterializedPreview(null);
   }, [selectedReviewId]);
+
+  // Refresh-safe staging progress (Phase 4.12B): the active staging run's
+  // identity lives in the URL (?stagingRunId=), not just in-memory state, so
+  // a hard refresh mid-materialization resumes watching the SAME run instead
+  // of losing it (and never creates a second one). Fetches once whenever the
+  // URL names a run this component doesn't already have loaded; the polling
+  // effect right below takes over from there while it's still in progress.
+  const stagingRunIdFromUrl = currentScreen === 'staging-publish' ? searchParams.get('stagingRunId') : null;
+  useEffect(() => {
+    if (!stagingRunIdFromUrl) return;
+    if (currentStagingRun?.id === stagingRunIdFromUrl) return;
+    let cancelled = false;
+    getStagingRun(stagingRunIdFromUrl)
+      .then((run) => {
+        if (!cancelled) setCurrentStagingRun(run);
+      })
+      .catch((err) => {
+        if (!cancelled) setStagingActionError(extractErrorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagingRunIdFromUrl]);
+
+  // Polls the real materialization job while it's genuinely in progress.
+  // Stops on READY/FAILED/CANCELLED/LEGACY (see isTerminalMaterializationPhase),
+  // on unmount, and whenever the run identity changes — never overlapping
+  // requests, never polling a run this session didn't just create and that
+  // the backend itself reports as unmaterialized (LEGACY; see
+  // resolveMaterializationUiPhase). A poll failure sets stagingPollError
+  // (transient — "couldn't refresh") without ever treating it as the run
+  // itself having failed.
+  useEffect(() => {
+    if (!currentStagingRun) return;
+    const runId = currentStagingRun.id;
+    const uiPhase = resolveMaterializationUiPhase(
+      currentStagingRun.materialization_phase,
+      justTriggeredStagingRunId === runId
+    );
+    if (isTerminalMaterializationPhase(uiPhase)) return;
+
+    let cancelled = false;
+    let inFlight = false;
+    const poll = () => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
+      getStagingRun(runId)
+        .then((run) => {
+          if (cancelled) return;
+          setCurrentStagingRun(run);
+          setStagingPollError(null);
+        })
+        .catch((err) => {
+          if (!cancelled) setStagingPollError(extractErrorMessage(err));
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    const interval = setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [currentStagingRun, justTriggeredStagingRunId]);
+
+  // Global operation visibility for staging (V1.0): fires exactly once when a
+  // run we're watching reaches READY/FAILED — reaches the user even if
+  // they've navigated away from Staging entirely. Deliberately does NOT
+  // duplicate Phase 4.12B's own in-page progress UI (steps, real percentage,
+  // counters all stay exactly as they were); this is only the "you can leave
+  // this page and still find out" complement to it. announcedStagingRunIdRef
+  // guards against re-announcing the same already-terminal run on a later
+  // remount (e.g. revisiting the page after the fact).
+  useEffect(() => {
+    if (!currentStagingRun) return;
+    const uiPhase = resolveMaterializationUiPhase(
+      currentStagingRun.materialization_phase,
+      justTriggeredStagingRunId === currentStagingRun.id
+    );
+    if (uiPhase !== 'READY' && uiPhase !== 'FAILED') return;
+    if (announcedStagingRunIdRef.current === currentStagingRun.id) return;
+    announcedStagingRunIdRef.current = currentStagingRun.id;
+
+    const datasetName =
+      workflowCatalogDatasets.find((d) => d.id === currentStagingRun.dataset_id)?.name ?? currentStagingRun.dataset_id;
+    const ctaAction = {
+      label: uiPhase === 'READY' ? 'View Staged Dataset' : 'View Details',
+      onClick: () => navigate(`/staging-publish/${currentStagingRun.dataset_id}?stagingRunId=${currentStagingRun.id}`),
+    };
+    if (uiPhase === 'READY') {
+      triggerToast(`Staging completed for "${datasetName}".`, { variant: 'success', action: ctaAction });
+    } else {
+      triggerToast(`Staging failed for "${datasetName}".`, { variant: 'error', action: ctaAction });
+    }
+  }, [currentStagingRun, justTriggeredStagingRunId, workflowCatalogDatasets]);
 
   // Refreshes staging records whenever the current staging run or the drift_only
   // filter changes (drift_only is the backend's own query param, not a client-only
@@ -1711,10 +2216,83 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStagingRun, driftOnlyFilter]);
 
+  // Shared dataset/connection/schema catalog for all five master/detail
+  // workflow screens (Validation, Data Quality Rules, Review & Corrections,
+  // Approval Center, Staging & Publish) — one fetch, reused everywhere a
+  // master list needs "which datasets exist, under which connection/schema",
+  // rather than duplicating Data Explorer's own copy of this per screen (kept
+  // separate from deSchemas/deDatasets so this screen's gating doesn't change
+  // Data Explorer's).
+  useEffect(() => {
+    if (
+      currentScreen !== 'validation-workspace' &&
+      currentScreen !== 'quality-rules' &&
+      currentScreen !== 'review-corrections' &&
+      currentScreen !== 'approval-center' &&
+      currentScreen !== 'staging-publish'
+    )
+      return;
+    if (!hasPermission('metadata.read')) {
+      setWorkflowCatalogError('You need the metadata.read permission to browse datasets.');
+      return;
+    }
+
+    let cancelled = false;
+    setWorkflowCatalogLoading(true);
+    setWorkflowCatalogError(null);
+
+    (async () => {
+      const connections = hasPermission('connections.read') ? await listConnections() : [];
+      const schemaLists = await Promise.all(
+        connections.map((c) => apiListSchemas(c.id).catch(() => [] as SchemaResponse[]))
+      );
+      const datasetsResp = await listDatasets({ page_size: 200 });
+      if (cancelled) return;
+      setWorkflowCatalogConnections(connections);
+      setWorkflowCatalogSchemas(schemaLists.flat());
+      setWorkflowCatalogDatasets(datasetsResp.items);
+    })()
+      .catch((err) => {
+        if (!cancelled) setWorkflowCatalogError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setWorkflowCatalogLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentUser?.id]);
+
+  // Real router navigation for every existing `onNavigate(screen)` callback
+  // threaded through the view components — their prop signature is untouched
+  // (still just a NavScreen), only what happens underneath changed: this now
+  // pushes a real URL instead of flipping in-memory state, so the address
+  // bar, refresh, and browser Back/Forward all reflect it. Screens whose only
+  // real route needs an id resolve it from whichever dataset is already
+  // selected (from the current URL) — matching every existing caller, which
+  // only ever invokes these bare when a dataset is already in scope (e.g.
+  // ValidationRunDetailsView's own "back to dataset" action).
   const handleNavigate = (screen: NavScreen) => {
-    setCurrentScreen(screen);
     setIsMobileNavOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (screen === 'dataset-overview' || screen === 'dataset-preview') {
+      if (!selectedDatasetId) {
+        navigate('/data-explorer');
+        return;
+      }
+      navigate(screen === 'dataset-overview' ? `/datasets/${selectedDatasetId}` : `/datasets/${selectedDatasetId}/preview`);
+      return;
+    }
+    if (screen === 'validation-run-details') {
+      // No existing caller invokes this bare (always via handleSelectValidationRun,
+      // which navigates directly) — falls back to the dataset's run list.
+      if (selectedDatasetId) navigate(`/validation/${selectedDatasetId}`);
+      return;
+    }
+    const path = SCREEN_TO_PATH[screen];
+    if (path) navigate(path);
   };
 
   // Clears the "View Datasets" scoping filter whenever Data Explorer isn't the
@@ -1732,24 +2310,15 @@ export default function App() {
     handleNavigate('data-explorer');
   };
 
-  // Toggles a rule between ACTIVE/DISABLED via the real PATCH endpoint (rules.manage).
-  // DISABLED (not "INACTIVE") is what the DB's ck_rules_status check constraint
-  // actually accepts (verified directly against migration 0009 — status is
-  // ACTIVE | DISABLED | PENDING_REVIEW, plain str with no Pydantic enum, so an
-  // invalid value only surfaces as a raw 500 from the DB constraint, not a 422).
-  // Waits for the real response before updating local state — no optimistic flip.
-  const handleToggleRule = async (id: string) => {
-    const target = rules.find((r) => r.id === id);
-    if (!target) return;
-    const nextStatus = target.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
-    try {
-      const updated = await apiUpdateRule(id, { status: nextStatus });
-      setRules((prev) => prev.map((r) => (r.id === id ? updated : r)));
-      triggerToast(nextStatus === 'ACTIVE' ? `Rule "${updated.name}" activated` : `Rule "${updated.name}" paused`);
-    } catch (err) {
-      setRulesActionError(extractErrorMessage(err));
-    }
-  };
+  // BUG FIX (this task): removed the old generic "toggle rule ACTIVE/DISABLED"
+  // handler that used to back a switch on every rule card, including
+  // PENDING_REVIEW ones. target.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+  // meant clicking it on a PENDING_REVIEW rule flipped it straight to ACTIVE —
+  // bypassing promote_rule() entirely, so the rule never got the RuleAssignment
+  // that promotion creates, yet looked "Active" with no dataset actually
+  // evaluating it. Rule review must go through promote/dismiss (RulesService),
+  // never a bare PATCH of status. Per-dataset enable/disable is still available
+  // via RuleAssignment.is_enabled (onDisableAssignment).
 
   const handleCreateRule = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1854,11 +2423,21 @@ export default function App() {
   // for the real result, and show it honestly (including when the AI half declined
   // or was unavailable, via ai_skipped_reason).
   const handleDetectRules = async (datasetId: string) => {
+    const datasetName =
+      (selectedDataset?.id === datasetId ? selectedDataset.name : undefined) ??
+      workflowCatalogDatasets.find((d) => d.id === datasetId)?.name ??
+      qualityRulesDatasets.find((d) => d.id === datasetId)?.name ??
+      datasetId;
     setIsDetectingRules(true);
     setRuleDetectionError(null);
     setRuleDetectionSummary(null);
     try {
       const { job_id } = await triggerRuleDetection({ dataset_id: datasetId });
+      // Immediate acknowledgement — fires only once the backend has actually
+      // accepted the job. Independent of the inline "Scanning columns…" button
+      // state on Dataset Overview, so the user still learns this reached the
+      // backend even before that button's own spinner is visible to them.
+      triggerToast(`Rule analysis started for "${datasetName}". You can continue working.`);
       const result = await pollAIJob(job_id);
       const patternCount = typeof result.pattern_detected_count === 'number' ? result.pattern_detected_count : 0;
       const aiCount = typeof result.ai_recommended_count === 'number' ? result.ai_recommended_count : 0;
@@ -1872,15 +2451,25 @@ export default function App() {
             ? `No confident pattern matches found, and the AI fallback didn't produce any either (${skippedReason}).`
             : 'No confident pattern matches or AI recommendations were found for this dataset\'s columns.'
         );
+        triggerToast(`Rule analysis completed for "${datasetName}" · No suggestions found`, { variant: 'success' });
       } else {
+        const totalCount = patternCount + aiCount;
         setRuleDetectionSummary(
-          `Found ${patternCount} pattern-detected and ${aiCount} AI-suggested rule${patternCount + aiCount === 1 ? '' : 's'} — review them below.` +
+          `Found ${patternCount} pattern-detected and ${aiCount} AI-suggested rule${totalCount === 1 ? '' : 's'} — review them below.` +
             (skippedReason ? ` (Some columns skipped the AI fallback: ${skippedReason})` : '')
         );
+        triggerToast(
+          `Rule analysis completed for "${datasetName}" · ${totalCount} suggestion${totalCount === 1 ? '' : 's'} found`,
+          {
+            variant: 'success',
+            action: { label: 'Review Suggestions', onClick: () => navigate(`/data-quality-rules/${datasetId}`) },
+          }
+        );
       }
-      triggerToast('Rule detection finished');
     } catch (err) {
-      setRuleDetectionError(extractErrorMessage(err));
+      const message = extractErrorMessage(err);
+      setRuleDetectionError(message);
+      triggerToast(`Rule analysis failed for "${datasetName}".`, { variant: 'error' });
     } finally {
       setIsDetectingRules(false);
     }
@@ -1956,7 +2545,7 @@ export default function App() {
   // mock-only local append.
   const handleCompleteAddSource = (input?: NewDataSourceInput) => {
     if (!input) {
-      setCurrentScreen('data-sources');
+      navigate('/data-sources');
       triggerToast('Data source connected');
       return;
     }
@@ -1979,7 +2568,7 @@ export default function App() {
     };
 
     setDataSources((prev) => [newSource, ...prev]);
-    setCurrentScreen('data-sources');
+    navigate('/data-sources');
     triggerToast(`Data source "${newSource.name}" successfully registered`);
   };
 
@@ -1995,7 +2584,7 @@ export default function App() {
       await apiChangePassword({ current_password: currentPassword, new_password: newPassword });
       apiLogout().finally(() => {
         setCurrentUser(null);
-        setCurrentScreen('login');
+        navigate('/login');
         triggerToast('Password changed — please sign in again with your new password.');
       });
       return true;
@@ -2319,6 +2908,34 @@ export default function App() {
     }
   };
 
+  // AI Details (Phase 4.10) — fetched on demand when a user expands a suggestion's
+  // AI Details section, never for every issue up front. Cached per suggestion id
+  // so re-expanding doesn't refetch; errors are cached separately (not the cache
+  // map) so a retry after a failure isn't blocked by the "already have/loading it"
+  // guard below.
+  const handleLoadAiTrace = async (suggestionId: string) => {
+    if (aiTraceBySuggestionId.has(suggestionId) || aiTraceLoadingIds.has(suggestionId)) return;
+    setAiTraceLoadingIds((prev) => new Set(prev).add(suggestionId));
+    setAiTraceErrorBySuggestionId((prev) => {
+      if (!prev.has(suggestionId)) return prev;
+      const next = new Map(prev);
+      next.delete(suggestionId);
+      return next;
+    });
+    try {
+      const trace = await getSuggestionAiTrace(suggestionId);
+      setAiTraceBySuggestionId((prev) => new Map(prev).set(suggestionId, trace));
+    } catch (err) {
+      setAiTraceErrorBySuggestionId((prev) => new Map(prev).set(suggestionId, extractErrorMessage(err)));
+    } finally {
+      setAiTraceLoadingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(suggestionId);
+        return next;
+      });
+    }
+  };
+
   // Generates rule-based/AI suggestions for whichever of this review's issues don't
   // have one yet, then refetches that review's issues+suggestions to pick them up
   // (no per-issue response is returned, so a refetch is the only way to see them).
@@ -2361,6 +2978,8 @@ export default function App() {
           originalValue: issue.original_value ?? '',
           suggestedValue: suggestion?.suggested_value ?? null,
           suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+          suggestionCategory: suggestion ? ((suggestion.category as Issue['suggestionCategory']) ?? null) : null,
+          suggestionReasoning: suggestion?.reasoning ?? null,
           // BUG FIX (Decimal-serialization sweep): same as above — confidence is a
           // Decimal-as-string on the wire.
           confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
@@ -2368,6 +2987,8 @@ export default function App() {
           finalValue: null,
           ruleTriggered: failure ? failure.rule_name : '—',
           suggestionId: suggestion?.id ?? null,
+          suggestionStrategy: suggestion?.strategy ?? null,
+          suggestionEvidence: suggestion?.evidence_detail ?? null,
         };
       });
       setIssues((prev) => [...prev.filter((i) => i.reviewRunId !== reviewRunId), ...refreshed]);
@@ -2488,10 +3109,13 @@ export default function App() {
   };
 
   const handleGenerateCorrections = async (reviewRunId: string) => {
+    const review = reviewRuns.find((r) => r.id === reviewRunId);
+    const reviewLabel = review?.datasetName ?? review?.name ?? reviewRunId;
     setAiGeneratingType('CORRECTION');
     setAiInsightsError(null);
     try {
       const { job_id } = await triggerCorrections({ review_run_id: reviewRunId });
+      triggerToast(`Generating corrections for "${reviewLabel}". You can continue working.`);
       const result = await pollAIJob(job_id);
       // Refresh this review's issues/suggestions in place (same shape as
       // handleGenerateSuggestions above) so the new AI-sourced rows are visible
@@ -2520,19 +3144,39 @@ export default function App() {
             originalValue: issue.original_value ?? '',
             suggestedValue: suggestion?.suggested_value ?? null,
             suggestionSource: suggestion ? ((suggestion.source as Issue['suggestionSource']) ?? null) : null,
+            suggestionCategory: suggestion ? ((suggestion.category as Issue['suggestionCategory']) ?? null) : null,
+            suggestionReasoning: suggestion?.reasoning ?? null,
             confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
             status: (issue.status as Issue['status']) || 'PENDING',
             finalValue: existing?.finalValue ?? null,
             ruleTriggered: existing?.ruleTriggered ?? '—',
             suggestionId: suggestion?.id ?? null,
+            suggestionStrategy: suggestion?.strategy ?? null,
+            suggestionEvidence: suggestion?.evidence_detail ?? null,
           };
         });
         return [...untouched, ...refreshed];
       });
       const count = typeof result.count === 'number' ? result.count : 0;
-      triggerToast(`${count} AI correction suggestion${count === 1 ? '' : 's'} generated — view them in Review & Corrections`);
+      triggerToast(
+        count > 0
+          ? `Corrections ready for "${reviewLabel}" · ${count} suggestion${count === 1 ? '' : 's'} generated`
+          : `Correction generation completed for "${reviewLabel}" · No suggestions generated`,
+        {
+          variant: 'success',
+          ...(review?.datasetId
+            ? {
+                action: {
+                  label: 'Review Corrections',
+                  onClick: () => navigate(`/review-corrections/${review.datasetId}?reviewId=${reviewRunId}`),
+                },
+              }
+            : {}),
+        }
+      );
     } catch (err) {
       setAiInsightsError(extractErrorMessage(err));
+      triggerToast(`Correction generation failed for "${reviewLabel}".`, { variant: 'error' });
     } finally {
       setAiGeneratingType(null);
     }
@@ -2614,7 +3258,16 @@ export default function App() {
       const { target } = await decideApproval(id, comment, (issue_ids) =>
         apiApproveApproval(id, { issue_ids, comment: comment || null })
       );
-      triggerToast(comment ? `"${target?.reviewRunName}" approved — "${comment}"` : `"${target?.reviewRunName}" approved`);
+      const datasetId = target?.reviewRunId ? reviewRuns.find((r) => r.id === target.reviewRunId)?.datasetId : undefined;
+      triggerToast(
+        comment ? `"${target?.reviewRunName}" approved — "${comment}"` : `"${target?.reviewRunName}" approved`,
+        {
+          variant: 'success',
+          // Proceed to Staging — only when this approval's dataset is actually
+          // resolvable and the existing staging route is real, never a guess.
+          ...(datasetId ? { action: { label: 'Proceed to Staging', onClick: () => navigate(`/staging-publish/${datasetId}`) } } : {}),
+        }
+      );
     } catch (err) {
       setApprovalActionError(extractErrorMessage(err));
     }
@@ -2632,7 +3285,7 @@ export default function App() {
   };
 
   // Validation Workspace Actions
-  const handleRunValidation = async () => {
+  const executeRunValidation = async () => {
     if (!selectedDatasetId) return;
     setIsTriggeringValidation(true);
     setValidationActionError(null);
@@ -2640,7 +3293,14 @@ export default function App() {
       const created = await createValidationRun(selectedDatasetId, {});
       const datasetName = selectedDataset?.name ?? selectedDatasetId;
       setValidationRuns((prev) => [mapValidationRun(created, datasetName), ...prev]);
-      triggerToast(`Validation run queued for "${datasetName}"`);
+      // Immediate acknowledgement — the backend has genuinely accepted the run
+      // (this fires only after createValidationRun resolves). Watching it
+      // (below) is what makes the eventual completion/failure toast reach the
+      // user even after they've navigated to a different screen.
+      triggerToast(`Validation started for "${datasetName}". You can continue working.`);
+      if (created.status !== 'COMPLETED' && created.status !== 'FAILED') {
+        setWatchedValidationRun({ runId: created.id, datasetId: selectedDatasetId, datasetName });
+      }
     } catch (err) {
       setValidationActionError(extractErrorMessage(err));
     } finally {
@@ -2648,9 +3308,107 @@ export default function App() {
     }
   };
 
+  // Polls the watched validation run until it reaches a terminal status, then
+  // fires a completion/failure toast with a "View Results" CTA into the real
+  // run — independent of whatever screen is currently open (Validation
+  // Workspace already refetches this same run set on its own when the user
+  // is actually looking at it; this is the navigate-away-safe complement to
+  // that, not a duplicate of it).
+  useEffect(() => {
+    if (!watchedValidationRun) return;
+    const { runId, datasetId, datasetName } = watchedValidationRun;
+    let cancelled = false;
+    let inFlight = false;
+
+    const finish = (run: ValidationRunResponse) => {
+      if (run.status === 'COMPLETED') {
+        const issueCount = run.warning_rows + run.failed_rows;
+        triggerToast(
+          issueCount > 0
+            ? `Validation completed for "${datasetName}" · ${issueCount.toLocaleString()} issue${issueCount === 1 ? '' : 's'} found`
+            : `Validation completed for "${datasetName}" · No issues found`,
+          {
+            variant: 'success',
+            action: { label: 'View Results', onClick: () => navigate(`/validation/${datasetId}/runs/${runId}`) },
+          }
+        );
+      } else if (run.status === 'FAILED') {
+        triggerToast(`Validation failed for "${datasetName}".`, {
+          variant: 'error',
+          action: { label: 'View Details', onClick: () => navigate(`/validation/${datasetId}/runs/${runId}`) },
+        });
+      }
+      // CANCELLED (or any other terminal-looking status) intentionally gets no
+      // toast — a validation run only ever reaches that via an explicit user
+      // cancel elsewhere in the same session, which already has its own
+      // feedback (see handleCancelValidationJob).
+    };
+
+    const poll = () => {
+      if (inFlight || cancelled) return;
+      inFlight = true;
+      getValidationRun(runId)
+        .then((run) => {
+          if (cancelled) return;
+          if (run.status === 'COMPLETED' || run.status === 'FAILED' || run.status === 'CANCELLED') {
+            setWatchedValidationRun(null);
+            finish(run);
+          }
+        })
+        .catch(() => {
+          // A transient poll failure here must not claim the validation itself
+          // failed — silently retry on the next tick (same discipline as the
+          // staging poller's stagingPollError, just without a dedicated banner
+          // since this watcher has no persistent UI of its own to show one in).
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    const interval = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchedValidationRun]);
+
+  // Guided pre-check (this task): "Run Validation" must not silently fire a
+  // 0-rules run that comes back looking like a genuine 100% pass. If this
+  // dataset has no enabled RuleAssignment, offer the guided choice instead
+  // of immediately triggering — "Run Anyway" still reaches executeRunValidation
+  // unchanged, so nothing is actually blocked, only defaulted away from.
+  const handleRunValidation = () => {
+    if (!selectedDatasetId) return;
+    const hasEnabledAssignment = ruleAssignments.some(
+      (a) => a.dataset_id === selectedDatasetId && a.is_enabled
+    );
+    if (hasEnabledAssignment) {
+      void executeRunValidation();
+      return;
+    }
+    setShowNoRulesConfirm(true);
+  };
+
   const handleSelectValidationRun = (runId: string) => {
-    setSelectedValidationRunId(runId);
-    handleNavigate('validation-run-details');
+    if (!selectedDatasetId) return;
+    navigate(`/validation/${selectedDatasetId}/runs/${runId}`);
+  };
+
+  // Mirrors the user's in-page review selection into the `?reviewId=` query
+  // param so it survives a refresh/bookmark, in addition to updating the
+  // local state everything else in this file already reads.
+  const handleSelectReview = (reviewId: string | null) => {
+    setSelectedReviewId(reviewId);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (reviewId) next.set('reviewId', reviewId);
+        else next.delete('reviewId');
+        return next;
+      },
+      { replace: true }
+    );
   };
 
   const handleCancelValidationJob = async () => {
@@ -2680,8 +3438,11 @@ export default function App() {
     setIsStartingReview(true);
     setValidationDetailActionError(null);
     try {
-      const created = await createReview({ validation_run_id: selectedValidationRun.id });
-      setSelectedReviewId(created.id);
+      await createReview({ validation_run_id: selectedValidationRun.id });
+      // Lands on the Review & Corrections master list (matching the pre-routing
+      // behavior of handleNavigate, which always reset straight to the master
+      // list) rather than this dataset's own detail page — the newly created
+      // review is visible from there.
       handleNavigate('review-corrections');
       triggerToast('Review started');
     } catch (err) {
@@ -2692,21 +3453,62 @@ export default function App() {
   };
 
   // Staging & Publish Actions
-  const handleCreateStagingRun = async () => {
-    if (!selectedReviewId) return;
+  // Returns the created run (or null on failure) so the new Stage Dataset
+  // confirmation/progress flow can reconcile its simulated steps with the real
+  // result — see StagingPublishView's runStaging.
+  // Phase 4.12B: creating a run also starts watching it — the new
+  // ?stagingRunId= query param is what actually opens StagingProgressView and
+  // drives the polling effect above, and it's what makes a refresh resume the
+  // same run instead of losing it (see that effect's own doc comment).
+  // justTriggeredStagingRunId is this session's own signal that a null
+  // materialization_phase on the very next poll means "queued," not "legacy."
+  const handleCreateStagingRun = async (): Promise<void> => {
+    if (!selectedReviewId || !selectedDatasetId) return;
     setIsStagingActionPending(true);
     setStagingActionError(null);
     try {
       const created = await apiCreateStagingRun(selectedReviewId);
+      setJustTriggeredStagingRunId(created.id);
       setCurrentStagingRun(created);
       setCurrentPublishRun(null);
-      triggerToast('Staging run created');
+      setStagingPollError(null);
+      navigate(`/staging-publish/${selectedDatasetId}?stagingRunId=${created.id}`);
+      const datasetName = stagingSelectedDatasetWorkspace?.name ?? selectedDatasetId;
+      triggerToast(`Staging started for "${datasetName}". You can continue working.`);
     } catch (err) {
       setStagingActionError(extractErrorMessage(err));
     } finally {
       setIsStagingActionPending(false);
     }
   };
+
+  // Staging & Publish dataset-centric redesign: selecting a dataset in the left
+  // explorer navigates to that dataset's own staging URL; the effect right below
+  // resolves whichever review run real data has already linked to it (via
+  // ReviewRun.datasetId, itself resolved from the review's real validation run)
+  // and drives selectedReviewId from that — reusing every existing staging/
+  // publish effect and handler unchanged, rather than adding a second,
+  // dataset-keyed staging state path. Runs on mount/param-change (not just on
+  // click) so a direct URL visit or refresh of /staging-publish/:datasetId
+  // rehydrates selectedReviewId exactly the same way a click would have.
+  const handleSelectStagingDataset = (datasetId: string) => {
+    navigate(`/staging-publish/${datasetId}`);
+  };
+
+  useEffect(() => {
+    if (currentScreen !== 'staging-publish' || !selectedDatasetId) return;
+    // BUG FIX (master/detail redesign audit): this used to take
+    // reviewRuns.find(r => r.datasetId === datasetId) — the FIRST matching
+    // review run in array order, not the one whose corrections are actually
+    // approved. A dataset with an old approved review superseded by a newer
+    // draft re-review (or simply returned in a different order by the
+    // backend) could silently bind staging to the wrong review. Staging
+    // eligibility must come from the dataset's real approved/partially-
+    // approved review, never "whichever review happened to match first" —
+    // see getStagingEligibleReview's own doc comment for the exact rule.
+    const eligibleReview = getStagingEligibleReview(reviewRuns, approvalQueue, selectedDatasetId);
+    setSelectedReviewId(eligibleReview?.id ?? null);
+  }, [currentScreen, selectedDatasetId, reviewRuns, approvalQueue]);
 
   // Always allowed to trigger — the backend itself creates the publish_run at PENDING
   // regardless of drift, and only the async job refuses to proceed past PENDING until
@@ -2757,6 +3559,104 @@ export default function App() {
     } finally {
       setIsStagingActionPending(false);
     }
+  };
+
+  // Staged revalidation (Phase 4.10) — fetched on demand when a user expands a
+  // staging record's row, never for every listed record up front (no bulk
+  // endpoint; avoids an N+1 burst on initial page load for a large run).
+  // Cached per staging record id; errors cached separately so a retry after a
+  // failure isn't blocked by the "already have/loading it" guard below.
+  const handleLoadRevalidation = async (stagingRecordId: string) => {
+    if (revalidationByRecordId.has(stagingRecordId) || revalidationLoadingIds.has(stagingRecordId)) return;
+    setRevalidationLoadingIds((prev) => new Set(prev).add(stagingRecordId));
+    setRevalidationErrorByRecordId((prev) => {
+      if (!prev.has(stagingRecordId)) return prev;
+      const next = new Map(prev);
+      next.delete(stagingRecordId);
+      return next;
+    });
+    try {
+      const reports = await getStagingRecordRevalidation(stagingRecordId);
+      setRevalidationByRecordId((prev) => new Map(prev).set(stagingRecordId, reports));
+    } catch (err) {
+      setRevalidationErrorByRecordId((prev) => new Map(prev).set(stagingRecordId, extractErrorMessage(err)));
+    } finally {
+      setRevalidationLoadingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(stagingRecordId);
+        return next;
+      });
+    }
+  };
+
+  // Closing the progress view just drops ?stagingRunId= — the run itself
+  // keeps going server-side regardless, and the workspace's own "Attempt #N"
+  // panel (and its "View Staged Dataset" action once READY) stays available
+  // without it.
+  const handleCloseStagingProgress = () => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('stagingRunId');
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
+  const handleRetryStagingPoll = () => {
+    if (!currentStagingRun) return;
+    setStagingPollError(null);
+    getStagingRun(currentStagingRun.id)
+      .then(setCurrentStagingRun)
+      .catch((err) => setStagingPollError(extractErrorMessage(err)));
+  };
+
+  // "View Staged Dataset" (Phase 4.12B) — the real materialized preview.
+  // Fetches destination once per run (not re-fetched on every filter/page
+  // change) and the first ALL/page-1 preview; onMaterializedPreviewFilterChange/
+  // onMaterializedPreviewOffsetChange below drive further backend-authoritative
+  // fetches. Never called for a LEGACY run — the "View Staged Dataset" action
+  // that reaches this only ever renders once materializationPhase is READY.
+  const fetchMaterializedPreview = (stagingRunId: string, filter: RowFilter, offset: number) => {
+    setMaterializedPreviewLoading(true);
+    setMaterializedPreviewError(null);
+    getStagingPreview(stagingRunId, { filter, limit: MATERIALIZED_PREVIEW_PAGE_SIZE, offset })
+      .then(setMaterializedPreview)
+      .catch((err) => setMaterializedPreviewError(extractErrorMessage(err)))
+      .finally(() => setMaterializedPreviewLoading(false));
+  };
+
+  const handleOpenMaterializedPreview = () => {
+    if (!currentStagingRun) return;
+    setIsMaterializedPreviewOpen(true);
+    setMaterializedPreviewFilter('ALL');
+    setMaterializedPreviewOffset(0);
+    setMaterializedDestinationLoading(true);
+    setMaterializedDestinationError(null);
+    getStagingDestination(currentStagingRun.id)
+      .then(setMaterializedDestination)
+      .catch((err) => setMaterializedDestinationError(extractErrorMessage(err)))
+      .finally(() => setMaterializedDestinationLoading(false));
+    fetchMaterializedPreview(currentStagingRun.id, 'ALL', 0);
+  };
+
+  const handleMaterializedPreviewFilterChange = (filter: RowFilter) => {
+    if (!currentStagingRun) return;
+    setMaterializedPreviewFilter(filter);
+    setMaterializedPreviewOffset(0);
+    fetchMaterializedPreview(currentStagingRun.id, filter, 0);
+  };
+
+  const handleMaterializedPreviewOffsetChange = (offset: number) => {
+    if (!currentStagingRun) return;
+    setMaterializedPreviewOffset(offset);
+    fetchMaterializedPreview(currentStagingRun.id, materializedPreviewFilter, offset);
+  };
+
+  const handleRetryMaterializedPreview = () => {
+    if (!currentStagingRun) return;
+    fetchMaterializedPreview(currentStagingRun.id, materializedPreviewFilter, materializedPreviewOffset);
   };
 
   // User Management Actions — real ApiError handling throughout, no optimistic
@@ -2872,6 +3772,424 @@ export default function App() {
     }
   };
 
+  // --- Staging & Publish dataset-centric redesign: derived view-model --------
+  // Everything below is computed from real state already fetched above (the
+  // broadened effects) plus the isolated helpers in
+  // src/data/datasetStagingWorkflow.ts. Nothing here is persisted anywhere —
+  // it only shapes StagingPublishView's props. Kept together, right before
+  // render, since it fans out across state owned by several older screens.
+
+  const schemaConnectionId = useMemo(() => {
+    const map = new Map<string, string>();
+    workflowCatalogSchemas.forEach((s) => map.set(s.id, s.connection_id));
+    return map;
+  }, [workflowCatalogSchemas]);
+
+  // Real, strictly-approved corrections (RESOLVED with a final value) — never
+  // SKIPPED issues, which resolved a decision but produced no correction.
+  // Shared by every dataset's staging status/approved-changes derivation below.
+  const resolvedIssuesByReviewId = useMemo(() => {
+    const map = new Map<string, Issue[]>();
+    issues.forEach((i) => {
+      if (i.status !== 'RESOLVED' || i.finalValue == null) return;
+      map.set(i.reviewRunId, [...(map.get(i.reviewRunId) ?? []), i]);
+    });
+    return map;
+  }, [issues]);
+
+  // --- Master/detail redesign: per-module master row derivations ------------
+  // All four (Validation, Rules, Review, Approval) share the same real
+  // dataset/connection/schema catalog fetched above; Staging's own row
+  // derivation follows right after this block since it also needs
+  // computeStagingDatasetStatus, defined next.
+
+  const validationMasterRows: ValidationMasterRow[] = useMemo(
+    () =>
+      workflowCatalogDatasets.map((d) => {
+        const connection = workflowCatalogConnections.find((c) => c.id === schemaConnectionId.get(d.schema_id));
+        const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
+        const runs = validationSummaryByDatasetId[d.id] ?? [];
+        const latest = runs[0] ?? null;
+        let status: ValidationMasterStatus = 'NOT_VALIDATED';
+        if (latest) {
+          if (latest.status === 'COMPLETED') status = 'COMPLETED';
+          else if (latest.status === 'FAILED') status = 'FAILED';
+          else if (latest.status === 'RUNNING') status = 'RUNNING';
+          else if (latest.status === 'QUEUED' || latest.status === 'CREATED') status = 'QUEUED';
+        }
+        return {
+          datasetId: d.id,
+          datasetName: d.name,
+          connectionName: connection?.name ?? 'Unknown connection',
+          schemaName: schema?.name ?? 'unknown_schema',
+          lastValidationLabel: latest ? (latest.completedAt !== 'Not completed' ? latest.completedAt : latest.startedAt) : null,
+          qualityScorePct: latest?.qualityScore ?? null,
+          noApplicableRules: !!latest?.noApplicableRules,
+          failedRows: latest?.failedRows ?? 0,
+          rulesEvaluatedCount: latest?.rulesEvaluatedCount ?? 0,
+          status,
+          lastRunAt: latest?.startedAt ?? null,
+        };
+      }),
+    [workflowCatalogDatasets, workflowCatalogSchemas, workflowCatalogConnections, schemaConnectionId, validationSummaryByDatasetId]
+  );
+
+  const rulesMasterRows: RulesMasterRow[] = useMemo(
+    () =>
+      workflowCatalogDatasets.map((d) => {
+        const connection = workflowCatalogConnections.find((c) => c.id === schemaConnectionId.get(d.schema_id));
+        const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
+        const assignments = ruleAssignments.filter((a) => a.dataset_id === d.id);
+        const activeAssignments = assignments.filter((a) => a.is_enabled);
+        const pending = getPendingReviewRulesForDataset(rules, ruleVersionsByRuleId, d.id);
+        const lastUpdatedRaw = assignments.reduce<string | null>((latest, a) => {
+          const t = a.updated_at ?? a.assigned_at;
+          if (!latest) return t;
+          return Date.parse(t) > Date.parse(latest) ? t : latest;
+        }, null);
+        let status: RulesMasterStatus;
+        if (assignments.length === 0 && pending.length === 0) status = 'NO_RULES';
+        else if (activeAssignments.length === 0 && pending.length > 0) status = 'PENDING_REVIEW';
+        else if (activeAssignments.length === 0) status = 'NEEDS_RULES';
+        else status = 'CONFIGURED';
+        return {
+          datasetId: d.id,
+          datasetName: d.name,
+          connectionName: connection?.name ?? 'Unknown connection',
+          schemaName: schema?.name ?? 'unknown_schema',
+          appliedRulesCount: assignments.length,
+          activeRulesCount: activeAssignments.length,
+          pendingCount: pending.length,
+          lastUpdatedLabel: lastUpdatedRaw ? formatDateTime(lastUpdatedRaw) : null,
+          status,
+        };
+      }),
+    [workflowCatalogDatasets, workflowCatalogSchemas, workflowCatalogConnections, schemaConnectionId, ruleAssignments, rules, ruleVersionsByRuleId]
+  );
+
+  const reviewMasterRows: ReviewMasterRow[] = useMemo(
+    () =>
+      workflowCatalogDatasets.map((d) => {
+        const connection = workflowCatalogConnections.find((c) => c.id === schemaConnectionId.get(d.schema_id));
+        const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
+        const review = getCurrentReviewForDataset(reviewRuns, d.id);
+        const latestValidation = (validationSummaryByDatasetId[d.id] ?? []).find((r) => r.status === 'COMPLETED') ?? null;
+        const base = {
+          datasetId: d.id,
+          datasetName: d.name,
+          connectionName: connection?.name ?? 'Unknown connection',
+          schemaName: schema?.name ?? 'unknown_schema',
+          qualityScorePct: latestValidation?.qualityScore ?? null,
+        };
+        if (!review) {
+          return {
+            ...base,
+            reviewRunId: null,
+            issuesCount: 0,
+            resolvedCount: 0,
+            remainingCount: 0,
+            suggestionsReadyCount: 0,
+            status: 'NO_REVIEW' as ReviewMasterStatus,
+            updatedLabel: null,
+          };
+        }
+        const suggestionsReadyCount = issues.filter(
+          (i) => i.reviewRunId === review.id && i.status === 'PENDING' && !!i.suggestedValue
+        ).length;
+        return {
+          ...base,
+          reviewRunId: review.id,
+          issuesCount: review.totalIssues,
+          resolvedCount: review.resolvedIssues,
+          remainingCount: review.totalIssues - review.resolvedIssues,
+          suggestionsReadyCount,
+          status: review.status as ReviewMasterStatus,
+          updatedLabel: review.updatedAt ?? review.createdAt,
+        };
+      }),
+    [workflowCatalogDatasets, workflowCatalogSchemas, workflowCatalogConnections, schemaConnectionId, reviewRuns, issues, validationSummaryByDatasetId]
+  );
+
+  const approvalMasterRows: ApprovalMasterRow[] = useMemo(
+    () =>
+      workflowCatalogDatasets
+        .map((d) => {
+          const connection = workflowCatalogConnections.find((c) => c.id === schemaConnectionId.get(d.schema_id));
+          const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
+          const relevant = getRelevantApprovalForDataset(reviewRuns, approvalQueue, d.id);
+          const currentReview = getCurrentReviewForDataset(reviewRuns, d.id);
+          const reviewReadyNotSubmitted = !relevant && currentReview?.status === 'READY_FOR_APPROVAL';
+          return {
+            datasetId: d.id,
+            datasetName: d.name,
+            connectionName: connection?.name ?? 'Unknown connection',
+            schemaName: schema?.name ?? 'unknown_schema',
+            approvalRequestId: relevant?.id ?? null,
+            changesCount: relevant?.affectedIssueCount ?? 0,
+            recordsAffected: relevant?.affectedRecordCount ?? 0,
+            submittedLabel: relevant?.requestedAt ?? null,
+            status: (relevant?.status ?? 'NOT_SUBMITTED') as ApprovalMasterStatus,
+            updatedLabel: relevant?.updatedAt ?? null,
+            reviewReadyNotSubmitted: !!reviewReadyNotSubmitted,
+          };
+        })
+        .filter((r) => r.approvalRequestId !== null || r.reviewReadyNotSubmitted),
+    [workflowCatalogDatasets, workflowCatalogSchemas, workflowCatalogConnections, schemaConnectionId, reviewRuns, approvalQueue]
+  );
+
+  // Staging/publish run status is only ever real for the dataset currently open
+  // in the workspace (see deriveDatasetStagingStatus's own doc comment). The
+  // review consulted is the dataset's real staging-eligible review (see
+  // getStagingEligibleReview's own doc comment for why this is deliberately
+  // NOT just "the latest review") — falling back to the dataset's current
+  // (in-progress, not-yet-approved) review only for the pre-approval statuses.
+  const computeStagingDatasetStatus = (datasetId: string): DatasetStagingStatus => {
+    const eligibleReview = getStagingEligibleReview(reviewRuns, approvalQueue, datasetId);
+    if (eligibleReview) {
+      const approval = getApprovalForReview(approvalQueue, eligibleReview.id);
+      const resolvedCount = resolvedIssuesByReviewId.get(eligibleReview.id)?.length ?? 0;
+      return deriveDatasetStagingStatus({
+        reviewStatus: eligibleReview.status,
+        resolvedIssues: resolvedCount,
+        approvalStatus: approval?.status,
+        stagingRunStatus: datasetId === selectedDatasetId ? currentStagingRun?.status ?? null : null,
+        publishRunStatus: datasetId === selectedDatasetId ? currentPublishRun?.status ?? null : null,
+        materializationPhase: datasetId === selectedDatasetId ? currentStagingRun?.materialization_phase ?? null : null,
+      });
+    }
+    const currentReview = getCurrentReviewForDataset(reviewRuns, datasetId);
+    const approval = currentReview ? getApprovalForReview(approvalQueue, currentReview.id) : null;
+    return deriveDatasetStagingStatus({
+      reviewStatus: currentReview?.status,
+      resolvedIssues: 0,
+      approvalStatus: approval?.status,
+      stagingRunStatus: null,
+      publishRunStatus: null,
+    });
+  };
+
+  const stagingMasterRows: StagingMasterRow[] = useMemo(
+    () =>
+      workflowCatalogDatasets.map((d) => {
+        const connId = schemaConnectionId.get(d.schema_id);
+        const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
+        const connection = workflowCatalogConnections.find((c) => c.id === connId);
+        const eligibleReview = getStagingEligibleReview(reviewRuns, approvalQueue, d.id);
+        const approvedIssues = eligibleReview ? resolvedIssuesByReviewId.get(eligibleReview.id) ?? [] : [];
+        return {
+          datasetId: d.id,
+          datasetName: d.name,
+          connectionName: connection?.name ?? 'Unknown connection',
+          schemaName: schema?.name ?? 'unknown_schema',
+          approvedChangesCount: approvedIssues.length,
+          rowsAffected: new Set(approvedIssues.map((i) => i.recordRef)).size,
+          status: computeStagingDatasetStatus(d.id),
+          lastStagedLabel:
+            d.id === selectedDatasetId && currentStagingRun
+              ? formatDateTime(currentStagingRun.completed_at ?? currentStagingRun.created_at)
+              : null,
+        };
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      workflowCatalogDatasets,
+      workflowCatalogSchemas,
+      workflowCatalogConnections,
+      schemaConnectionId,
+      reviewRuns,
+      approvalQueue,
+      resolvedIssuesByReviewId,
+      selectedDatasetId,
+      currentStagingRun,
+    ]
+  );
+
+  const stagingWorkspaceDatasetRecord: DatasetResponse | null = useMemo(() => {
+    if (!selectedDatasetId) return null;
+    if (selectedDataset && selectedDataset.id === selectedDatasetId) return selectedDataset;
+    return workflowCatalogDatasets.find((d) => d.id === selectedDatasetId) ?? null;
+  }, [selectedDatasetId, selectedDataset, workflowCatalogDatasets]);
+
+  // For DISPLAY (status labels, "N of M resolved" messaging) — falls back to
+  // the dataset's current in-progress review so pre-approval empty states
+  // still show real numbers.
+  const stagingSelectedReview = selectedDatasetId
+    ? getStagingEligibleReview(reviewRuns, approvalQueue, selectedDatasetId) ??
+      getCurrentReviewForDataset(reviewRuns, selectedDatasetId)
+    : null;
+  const stagingSelectedApproval = stagingSelectedReview ? getApprovalForReview(approvalQueue, stagingSelectedReview.id) : null;
+
+  // For the actual "Approved Changes" staged-for-real content — deliberately
+  // NOT the same fallback as above. A review that's merely in progress (its
+  // issues individually marked RESOLVED but never submitted/approved) must
+  // never be presented as "approved for staging"; only a genuinely
+  // approved/partially-approved review's corrections qualify.
+  const stagingEligibleReview = selectedDatasetId
+    ? getStagingEligibleReview(reviewRuns, approvalQueue, selectedDatasetId)
+    : null;
+  const stagingApprovedIssues = stagingEligibleReview ? resolvedIssuesByReviewId.get(stagingEligibleReview.id) ?? [] : [];
+
+  const stagingApprovedChanges = useMemo(
+    () =>
+      stagingApprovedIssues.map((i) => ({
+        recordRef: i.recordRef,
+        columnName: i.columnName,
+        originalValue: i.originalValue,
+        stagedValue: i.finalValue as string,
+      })),
+    [stagingApprovedIssues]
+  );
+
+  const stagingSelectedDatasetWorkspace = useMemo(() => {
+    if (!stagingWorkspaceDatasetRecord || !selectedDatasetId) return null;
+    const schema = workflowCatalogSchemas.find((s) => s.id === stagingWorkspaceDatasetRecord.schema_id);
+    const connection = workflowCatalogConnections.find((c) => c.id === schema?.connection_id);
+    const latestCompletedValidation = validationRuns.find((v) => v.status === 'COMPLETED');
+    return {
+      id: stagingWorkspaceDatasetRecord.id,
+      name: stagingWorkspaceDatasetRecord.name,
+      connectionName: connection?.name ?? 'Unknown connection',
+      schemaName: schema?.name ?? 'unknown_schema',
+      keyStrategy: stagingWorkspaceDatasetRecord.key_strategy || null,
+      sourceRowCount: stagingWorkspaceDatasetRecord.row_count_estimate,
+      lastValidationLabel: latestCompletedValidation ? `Completed ${latestCompletedValidation.completedAt}` : null,
+      approvalStatusLabel: stagingSelectedApproval
+        ? humanizeEnum(stagingSelectedApproval.status)
+        : stagingSelectedReview
+        ? humanizeEnum(stagingSelectedReview.status)
+        : null,
+      resolvedIssueCount: stagingSelectedReview?.resolvedIssues ?? 0,
+      totalIssueCount: stagingSelectedReview?.totalIssues ?? 0,
+      status: computeStagingDatasetStatus(selectedDatasetId),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    stagingWorkspaceDatasetRecord,
+    selectedDatasetId,
+    workflowCatalogSchemas,
+    workflowCatalogConnections,
+    validationRuns,
+    stagingSelectedApproval,
+    stagingSelectedReview,
+    currentStagingRun,
+    currentPublishRun,
+  ]);
+
+  const stagingPreviewColumns: PreviewColumn[] = useMemo(() => {
+    if (selectedDatasetColumns.length > 0 && selectedDataset?.id === selectedDatasetId) {
+      return selectedDatasetColumns
+        .slice()
+        .sort((a, b) => a.ordinal_position - b.ordinal_position)
+        .map((c) => ({ name: c.name, isPrimaryKey: c.is_primary_key }));
+    }
+    if (datasetPreview && datasetPreview.dataset_id === selectedDatasetId) {
+      return datasetPreview.columns.map((name) => ({ name }));
+    }
+    return [];
+  }, [selectedDatasetColumns, selectedDataset, selectedDatasetId, datasetPreview]);
+
+  // The real backend only returns AFFECTED staging records, never a
+  // materialized full staged table (see this file's own comments on
+  // StagingRunResponse/StagingRecordResponse). This overlays real approved
+  // corrections onto real live source rows (GET /datasets/{id}/preview) where
+  // they can be matched by record_ref — an honest, best-effort reconstruction
+  // of "what staging will look like," not a claim that the backend already
+  // materializes it. See findMatchingPreviewRow's own doc comment for the
+  // matching approach and its limits.
+  const stagingPreviewData = useMemo(() => {
+    const changesByRecordRef = new Map<string, typeof stagingApprovedChanges>();
+    stagingApprovedChanges.forEach((c) => {
+      changesByRecordRef.set(c.recordRef, [...(changesByRecordRef.get(c.recordRef) ?? []), c]);
+    });
+
+    const hasLivePreview = !!datasetPreview && datasetPreview.dataset_id === selectedDatasetId;
+    const previewSourceRows = hasLivePreview ? datasetPreview!.rows : [];
+    const matchedRecordRefs = new Set<string>();
+
+    const rows: PreviewRow[] = previewSourceRows.map((sourceRow, idx) => {
+      let matchedChanges: typeof stagingApprovedChanges | undefined;
+      let matchedRef: string | undefined;
+      for (const [ref, changes] of changesByRecordRef) {
+        if (findMatchingPreviewRow(ref, [sourceRow])) {
+          matchedChanges = changes;
+          matchedRef = ref;
+          break;
+        }
+      }
+      const cells: PreviewRow['cells'] = {};
+      stagingPreviewColumns.forEach((col) => {
+        const changed = matchedChanges?.find((c) => c.columnName === col.name);
+        cells[col.name] = {
+          value: changed ? changed.stagedValue : sourceRow[col.name],
+          isChanged: !!changed,
+          originalValue: changed ? changed.originalValue : undefined,
+        };
+      });
+      if (matchedRef) matchedRecordRefs.add(matchedRef);
+      return { key: matchedRef ?? `row-${idx}`, isChanged: !!matchedChanges, cells };
+    });
+
+    // Approved changes whose record_ref couldn't be matched to a live preview
+    // row (unfamiliar ref format, or preview unavailable) still get their own
+    // row — only the corrected fields are known for these; ChangePreviewTable
+    // honestly renders every other column as "not shown" for them.
+    Array.from(changesByRecordRef.entries())
+      .filter(([ref]) => !matchedRecordRefs.has(ref))
+      .forEach(([ref, changes]) => {
+        const cells: PreviewRow['cells'] = {};
+        changes.forEach((c) => {
+          cells[c.columnName] = { value: c.stagedValue, isChanged: true, originalValue: c.originalValue };
+        });
+        rows.push({ key: ref, isChanged: true, cells });
+      });
+
+    const limitationNote = !hasLivePreview
+      ? 'Live source preview is unavailable (requires the data_preview.read permission) — only rows with approved corrections are shown below.'
+      : datasetPreview!.capped_to_max
+      ? `This preview is capped to ${datasetPreview!.row_count.toLocaleString()} of the dataset's real rows — the full table isn't materialized until staging runs server-side (Phase 4.12).`
+      : null;
+
+    return { rows, limitationNote };
+  }, [datasetPreview, selectedDatasetId, stagingApprovedChanges, stagingPreviewColumns]);
+
+  const stagingTableStructureColumns: TableStructureColumn[] = useMemo(() => {
+    if (selectedDatasetColumns.length > 0 && selectedDataset?.id === selectedDatasetId) {
+      return selectedDatasetColumns
+        .slice()
+        .sort((a, b) => a.ordinal_position - b.ordinal_position)
+        .map((c) => ({ name: c.name, dataType: c.normalized_data_type, isPrimaryKey: c.is_primary_key }));
+    }
+    return stagingPreviewColumns.map((c) => ({ name: c.name, dataType: 'unknown', isPrimaryKey: c.isPrimaryKey }));
+  }, [selectedDatasetColumns, selectedDataset, selectedDatasetId, stagingPreviewColumns]);
+
+  // Phase 4.12B — real materialization state for the currently-open
+  // workspace's staging run, derived fresh every render from currentStagingRun
+  // (kept live by the resume/polling effects above) and this session's own
+  // justTriggeredStagingRunId signal. materializationUiPhase is null only
+  // when there's no staging run open at all (nothing to show progress for).
+  const materializationUiPhase: MaterializationUiPhase | null = currentStagingRun
+    ? resolveMaterializationUiPhase(currentStagingRun.materialization_phase, justTriggeredStagingRunId === currentStagingRun.id)
+    : null;
+  const realStagingDestination = currentStagingRun ? stagingDestinationFromRun(currentStagingRun) : null;
+  const isStagingProgressOpen = !!stagingRunIdFromUrl && currentStagingRun?.id === stagingRunIdFromUrl;
+
+  const materializedPreviewColumns: PreviewColumn[] = useMemo(
+    () => (materializedPreview ? materializedPreview.columns.map((name) => ({ name })) : []),
+    [materializedPreview]
+  );
+  const materializedPreviewRows: PreviewRow[] = useMemo(() => {
+    if (!materializedPreview) return [];
+    return materializedPreview.rows.map((row, idx) => {
+      const correctedByColumn = new Map(row.corrected_fields.map((f) => [f.column_name, f]));
+      const cells: PreviewRow['cells'] = {};
+      Object.entries(row.values).forEach(([col, value]) => {
+        const corrected = correctedByColumn.get(col);
+        cells[col] = { value, isChanged: !!corrected, originalValue: corrected?.original_value ?? undefined };
+      });
+      return { key: row.record_ref ?? `row-${idx}`, isChanged: row.is_changed, cells };
+    });
+  }, [materializedPreview]);
+
   if (authStatus === 'checking') {
     return (
       <main className="w-full h-screen flex items-center justify-center bg-surface font-sans text-on-surface">
@@ -2883,13 +4201,21 @@ export default function App() {
     );
   }
 
-  // Not logged in (or explicitly signed out): show LoginView
+  // Not logged in (or explicitly signed out): show LoginView. The URL itself is
+  // left untouched while this renders — a deep link/bookmark/refresh of e.g.
+  // /review-corrections/abc that hits this gate keeps that exact URL, so once
+  // login succeeds the very next render just shows whatever page the address
+  // bar already says, with no extra redirect needed. Only the two "no specific
+  // destination was intended" entry points (bare "/login", or "/" before its
+  // own redirect effect above fires) get sent to /dashboard explicitly.
   if (!currentUser || currentScreen === 'login') {
     return (
       <LoginView
         onLoginSuccess={(user) => {
           setCurrentUser(user);
-          setCurrentScreen('dashboard');
+          if (location.pathname === '/login' || location.pathname === '/') {
+            navigate('/dashboard', { replace: true });
+          }
           triggerToast(`Welcome back, ${user.name}`);
         }}
       />
@@ -2899,11 +4225,27 @@ export default function App() {
   if (currentScreen === 'add-data-source') {
     return (
       <AddDataSourceView
-        onBack={() => setCurrentScreen('data-sources')}
+        onBack={() => navigate('/data-sources')}
         onComplete={handleCompleteAddSource}
       />
     );
   }
+
+  // V1.0 global operation visibility — derived from state this file already
+  // owns (never a second, duplicate copy of backend job state): a validation
+  // run this session is watching, AI rule detection, AI correction
+  // generation, or a non-terminal staging materialization.
+  const isStagingMaterializing =
+    !!currentStagingRun &&
+    !isTerminalMaterializationPhase(
+      resolveMaterializationUiPhase(currentStagingRun.materialization_phase, justTriggeredStagingRunId === currentStagingRun.id)
+    );
+  const activeOperationsCount = [
+    watchedValidationRun !== null,
+    isDetectingRules,
+    aiGeneratingType === 'CORRECTION',
+    isStagingMaterializing,
+  ].filter(Boolean).length;
 
   return (
     <div className="flex h-screen bg-surface font-sans text-on-surface antialiased overflow-hidden selection:bg-surface-container-high selection:text-primary">
@@ -2923,10 +4265,10 @@ export default function App() {
           onLogout={() => {
             apiLogout().finally(() => {
               setCurrentUser(null);
-              setCurrentScreen('login');
+              navigate('/login');
             });
           }}
-          onOpenProfile={() => setCurrentScreen('settings')}
+          onOpenProfile={() => navigate('/settings')}
           canSeeOwnRole={hasPermission('users.read')}
           onChangePassword={handleChangePassword}
           isChangingPassword={isChangingPassword}
@@ -2936,6 +4278,8 @@ export default function App() {
           onSearchChange={setSearchQuery}
           onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)}
           onOpenAIAssistant={() => setShowAICopilot(true)}
+          activeOperationsCount={activeOperationsCount}
+          onOpenRunningOperations={() => handleNavigate('run-history')}
         />
 
         {/* Scrollable View Canvas */}
@@ -2945,10 +4289,7 @@ export default function App() {
               currentUser={currentUser}
               onNavigate={handleNavigate}
               onOpenNewDataset={() => handleNavigate('add-data-source')}
-              onOpenDataset={(datasetId) => {
-                setSelectedDatasetId(datasetId);
-                handleNavigate('dataset-overview');
-              }}
+              onOpenDataset={(datasetId) => navigate(`/datasets/${datasetId}`)}
               canReadReports={hasPermission('reports.read')}
               reportsLoading={reportsLoading}
               reportsError={reportsError}
@@ -3025,6 +4366,7 @@ export default function App() {
                     isTriggeringValidation={isTriggeringValidation}
                     validationActionError={validationActionError}
                     canViewRules={hasPermission('rules.read')}
+                    rulesLoading={rulesLoading}
                     rules={rules}
                     ruleVersionsByRuleId={ruleVersionsByRuleId}
                     ruleAssignments={ruleAssignments.filter((a) => a.dataset_id === selectedDatasetId)}
@@ -3040,6 +4382,10 @@ export default function App() {
                     ruleReviewActionError={ruleReviewActionError}
                     canViewApprovals={hasPermission('approval.read')}
                     approvals={approvalQueue.filter((a) => a.datasetName === selectedDataset?.name)}
+                    canViewPreview={hasPermission('data_preview.read')}
+                    preview={datasetPreview}
+                    previewLoading={datasetPreviewLoading}
+                    previewError={datasetPreviewError}
                   />
                 )
               )
@@ -3071,10 +4417,7 @@ export default function App() {
                 schemas={deSchemas}
                 datasets={deDatasets}
                 columns={deColumns}
-                onOpenDataset={(datasetId) => {
-                  setSelectedDatasetId(datasetId);
-                  handleNavigate('dataset-overview');
-                }}
+                onOpenDataset={(datasetId) => navigate(`/datasets/${datasetId}`)}
                 dataSourceFilter={explorerDataSourceFilter}
                 onClearDataSourceFilter={() => setExplorerDataSourceFilter(null)}
               />
@@ -3095,8 +4438,20 @@ export default function App() {
             )}
 
           {currentScreen === 'validation-workspace' &&
-            (!selectedDatasetId ? (
-              <ScreenPrompt message="Select a dataset from Data Explorer to run or view its validations." />
+            (!isValidationDetailOpen ? (
+              renderGated(
+                hasPermission('metadata.read'),
+                'You need the metadata.read permission to view validation status.',
+                workflowCatalogLoading || validationSummaryLoading,
+                'Loading validation status…',
+                workflowCatalogError,
+                <ValidationMasterView
+                  rows={validationMasterRows}
+                  loading={workflowCatalogLoading || validationSummaryLoading}
+                  error={workflowCatalogError}
+                  onOpenDataset={(datasetId) => navigate(`/validation/${datasetId}`)}
+                />
+              )
             ) : (
               renderGated(
                 hasPermission('metadata.read'),
@@ -3104,16 +4459,23 @@ export default function App() {
                 validationLoading,
                 'Loading validation runs…',
                 validationError,
-                <ValidationWorkspaceView
-                  onNavigate={handleNavigate}
-                  datasetName={selectedDataset?.name ?? selectedDatasetId}
-                  validationRuns={validationRuns}
-                  onRunValidation={handleRunValidation}
-                  onSelectRun={handleSelectValidationRun}
-                  canTriggerValidation={hasPermission('validation.run')}
-                  isTriggering={isTriggeringValidation}
-                  actionError={validationActionError}
-                />
+                <>
+                  <WorkflowBreadcrumb
+                    moduleLabel="Validation"
+                    itemLabel={selectedDataset?.name ?? selectedDatasetId ?? ''}
+                    onBack={() => navigate('/validation')}
+                  />
+                  <ValidationWorkspaceView
+                    onNavigate={handleNavigate}
+                    datasetName={selectedDataset?.name ?? selectedDatasetId ?? ''}
+                    validationRuns={validationRuns}
+                    onRunValidation={handleRunValidation}
+                    onSelectRun={handleSelectValidationRun}
+                    canTriggerValidation={hasPermission('validation.run')}
+                    isTriggering={isTriggeringValidation}
+                    actionError={validationActionError}
+                  />
+                </>
               )
             ))}
 
@@ -3143,115 +4505,272 @@ export default function App() {
                 onFailuresSeverityChange={setValidationFailuresSeverity}
                 failuresLoading={validationFailuresLoading}
                 failuresError={validationFailuresError}
+                evaluatedRules={evaluatedRules}
+                evaluatedRulesLoading={evaluatedRulesLoading}
+                evaluatedRulesError={evaluatedRulesError}
               />
             )}
 
           {currentScreen === 'quality-rules' &&
-            renderGated(
-              hasPermission('rules.read'),
-              'You need the rules.read permission to view quality rules.',
-              rulesLoading,
-              'Loading rules…',
-              rulesError,
-              <QualityRulesView
-                onNavigate={handleNavigate}
-                onOpenRuleCreator={() => setShowRuleCreatorModal(true)}
-                rules={rules}
-                ruleAssignments={ruleAssignments}
-                ruleVersionIdsByRuleId={Object.fromEntries(
-                  Object.entries(ruleVersionsByRuleId).map(([ruleId, versions]) => [ruleId, versions.map((v) => v.id)])
-                )}
-                canManageRules={hasPermission('rules.manage')}
-                canManageAssignments={hasPermission('rule_assignments.manage')}
-                onToggleRule={handleToggleRule}
-                onDisableAssignment={handleDisableAssignment}
-                onOpenAssignmentForm={(ruleId) => {
-                  setAssignmentRuleId(ruleId);
-                  setShowAssignmentForm(true);
-                }}
-                onOpenVersionForm={(ruleId) => {
-                  setVersionRuleId(ruleId);
-                  setShowVersionForm(true);
-                }}
-                actionError={rulesActionError}
-              />
-            )}
+            (!isRulesDetailOpen ? (
+              renderGated(
+                hasPermission('rules.read'),
+                'You need the rules.read permission to view quality rules.',
+                workflowCatalogLoading || rulesLoading,
+                'Loading rule assignments…',
+                workflowCatalogError,
+                <QualityRulesMasterView
+                  rows={rulesMasterRows}
+                  loading={workflowCatalogLoading || rulesLoading}
+                  error={workflowCatalogError}
+                  onOpenDataset={(datasetId) => navigate(`/data-quality-rules/${datasetId}`)}
+                />
+              )
+            ) : (
+              renderGated(
+                hasPermission('rules.read'),
+                'You need the rules.read permission to view quality rules.',
+                rulesLoading,
+                'Loading rules…',
+                rulesError,
+                <>
+                  <WorkflowBreadcrumb
+                    moduleLabel="Data Quality Rules"
+                    itemLabel={
+                      qualityRulesDatasets.find((d) => d.id === selectedDatasetId)?.name ?? selectedDatasetId ?? ''
+                    }
+                    onBack={() => navigate('/data-quality-rules')}
+                  />
+                  <QualityRulesView
+                    onNavigate={handleNavigate}
+                    onOpenRuleCreator={() => setShowRuleCreatorModal(true)}
+                    datasets={qualityRulesDatasets}
+                    rules={rules}
+                    ruleAssignments={ruleAssignments}
+                    ruleVersionIdsByRuleId={Object.fromEntries(
+                      Object.entries(ruleVersionsByRuleId).map(([ruleId, versions]) => [ruleId, versions.map((v) => v.id)])
+                    )}
+                    canManageRules={hasPermission('rules.manage')}
+                    canManageAssignments={hasPermission('rule_assignments.manage')}
+                    onDisableAssignment={handleDisableAssignment}
+                    onOpenAssignmentForm={(ruleId, datasetId) => {
+                      setAssignmentRuleId(ruleId);
+                      if (datasetId) {
+                        setAssignmentDatasetId(datasetId);
+                        listDatasetColumns(datasetId)
+                          .then(setAssignmentDatasetColumns)
+                          .catch(() => setAssignmentDatasetColumns([]));
+                      }
+                      setShowAssignmentForm(true);
+                    }}
+                    onOpenVersionForm={(ruleId) => {
+                      setVersionRuleId(ruleId);
+                      setShowVersionForm(true);
+                    }}
+                    onOpenDatasetOverview={(datasetId) => navigate(`/datasets/${datasetId}`)}
+                    actionError={rulesActionError}
+                    focusDatasetId={selectedDatasetId ?? undefined}
+                  />
+                </>
+              )
+            ))}
 
           {currentScreen === 'review-corrections' &&
-            renderGated(
-              hasPermission('review.read'),
-              'You need the review.read permission to view reviews.',
-              reviewRunsLoading,
-              'Loading reviews…',
-              reviewRunsError,
-              <ReviewCorrectionsView
-                onNavigate={handleNavigate}
-                reviewRuns={reviewRuns}
-                selectedReviewId={selectedReviewId}
-                onSelectReview={setSelectedReviewId}
-                issues={issues}
-                canEdit={hasPermission('review.edit')}
-                actionError={reviewActionError}
-                pendingIssueIds={reviewActionPendingIds}
-                onGenerateSuggestions={handleGenerateSuggestions}
-                isGeneratingSuggestions={isGeneratingSuggestions}
-                onAcceptIssue={handleAcceptIssue}
-                onEditIssue={handleEditIssue}
-                onRejectIssue={handleRejectIssue}
-                onSkipIssue={handleSkipIssue}
-                onBulkAccept={handleBulkAccept}
-                onBulkReject={handleBulkReject}
-                onSubmitForApproval={handleSubmitForApproval}
-              />
-            )}
+            (!isReviewDetailOpen ? (
+              renderGated(
+                hasPermission('review.read'),
+                'You need the review.read permission to view reviews.',
+                workflowCatalogLoading || reviewRunsLoading || validationSummaryLoading,
+                'Loading reviews…',
+                workflowCatalogError,
+                <ReviewCorrectionsMasterView
+                  rows={reviewMasterRows}
+                  loading={workflowCatalogLoading || reviewRunsLoading || validationSummaryLoading}
+                  error={workflowCatalogError}
+                  onOpenDataset={(datasetId) => {
+                    const review = getCurrentReviewForDataset(reviewRuns, datasetId);
+                    navigate(`/review-corrections/${datasetId}${review ? `?reviewId=${review.id}` : ''}`);
+                  }}
+                />
+              )
+            ) : (
+              renderGated(
+                hasPermission('review.read'),
+                'You need the review.read permission to view reviews.',
+                reviewRunsLoading,
+                'Loading reviews…',
+                reviewRunsError,
+                <>
+                  <WorkflowBreadcrumb
+                    moduleLabel="Review & Corrections"
+                    itemLabel={selectedDataset?.name ?? selectedDatasetId ?? ''}
+                    onBack={() => navigate('/review-corrections')}
+                  />
+                  <ReviewCorrectionsView
+                    onNavigate={handleNavigate}
+                    reviewRuns={getReviewsForDataset(reviewRuns, selectedDatasetId ?? '')}
+                    selectedReviewId={selectedReviewId}
+                    onSelectReview={handleSelectReview}
+                    issues={issues}
+                    canEdit={hasPermission('review.edit')}
+                    actionError={reviewActionError}
+                    pendingIssueIds={reviewActionPendingIds}
+                    onGenerateSuggestions={handleGenerateSuggestions}
+                    isGeneratingSuggestions={isGeneratingSuggestions}
+                    canUseAISuggestions={hasPermission('ai.suggest')}
+                    onGenerateAISuggestions={handleGenerateCorrections}
+                    isGeneratingAISuggestions={aiGeneratingType === 'CORRECTION'}
+                    aiSuggestionsError={aiInsightsError}
+                    onAcceptIssue={handleAcceptIssue}
+                    onEditIssue={handleEditIssue}
+                    onRejectIssue={handleRejectIssue}
+                    onSkipIssue={handleSkipIssue}
+                    onBulkAccept={handleBulkAccept}
+                    onBulkReject={handleBulkReject}
+                    onSubmitForApproval={handleSubmitForApproval}
+                    aiTraceBySuggestionId={aiTraceBySuggestionId}
+                    aiTraceLoadingIds={aiTraceLoadingIds}
+                    aiTraceErrorBySuggestionId={aiTraceErrorBySuggestionId}
+                    onLoadAiTrace={handleLoadAiTrace}
+                  />
+                </>
+              )
+            ))}
 
           {currentScreen === 'approval-center' &&
-            renderGated(
-              hasPermission('approval.read'),
-              'You need the approval.read permission to view the approval center.',
-              approvalsLoading,
-              'Loading approval requests…',
-              approvalsError,
-              <ApprovalCenterView
-                onNavigate={handleNavigate}
-                approvalQueue={approvalQueue}
-                canDecide={hasPermission('approval.decide')}
-                pendingId={approvalActionPendingId}
-                actionError={approvalActionError}
-                onApprove={handleApproveRequest}
-                onReject={handleRejectRequest}
-                onSelect={(id) => {
-                  const item = approvalQueue.find((a) => a.id === id);
-                  if (item?.reviewRunId) setSelectedReviewId(item.reviewRunId);
-                }}
-              />
-            )}
+            (!isApprovalDetailOpen ? (
+              renderGated(
+                hasPermission('approval.read'),
+                'You need the approval.read permission to view the approval center.',
+                workflowCatalogLoading || approvalsLoading,
+                'Loading approval requests…',
+                workflowCatalogError,
+                <ApprovalCenterMasterView
+                  rows={approvalMasterRows}
+                  loading={workflowCatalogLoading || approvalsLoading}
+                  error={workflowCatalogError}
+                  onOpenApproval={(datasetId) => navigate(`/approval-center/${datasetId}`)}
+                />
+              )
+            ) : (
+              renderGated(
+                hasPermission('approval.read'),
+                'You need the approval.read permission to view the approval center.',
+                approvalsLoading,
+                'Loading approval requests…',
+                approvalsError,
+                (() => {
+                  const request = selectedDatasetId
+                    ? getRelevantApprovalForDataset(reviewRuns, approvalQueue, selectedDatasetId)
+                    : null;
+                  return (
+                    <>
+                      <WorkflowBreadcrumb
+                        moduleLabel="Approval Center"
+                        itemLabel={selectedDataset?.name ?? selectedDatasetId ?? ''}
+                        onBack={() => navigate('/approval-center')}
+                      />
+                      {!request ? (
+                        <ScreenPrompt message="This dataset has no approval request to review anymore." />
+                      ) : (
+                        <ApprovalCenterView
+                          request={request}
+                          canDecide={hasPermission('approval.decide')}
+                          isPending={approvalActionPendingId === request.id}
+                          actionError={approvalActionError}
+                          onApprove={handleApproveRequest}
+                          onReject={handleRejectRequest}
+                        />
+                      )}
+                    </>
+                  );
+                })()
+              )
+            ))}
 
           {currentScreen === 'staging-publish' &&
-            (!selectedReviewId ? (
-              <ScreenPrompt message="Select a review from Review & Corrections or Approval Center to stage and publish it." />
+            (!isStagingDetailOpen ? (
+              renderGated(
+                hasPermission('staging.read'),
+                'You need the staging.read permission to view staging & publish.',
+                workflowCatalogLoading,
+                'Loading staging readiness…',
+                workflowCatalogError,
+                <StagingMasterView
+                  rows={stagingMasterRows}
+                  loading={workflowCatalogLoading}
+                  error={workflowCatalogError}
+                  onOpenDataset={handleSelectStagingDataset}
+                />
+              )
             ) : (
               renderGated(
                 hasPermission('staging.read'),
                 'You need the staging.read permission to view staging & publish.',
-                stagingLoading,
+                false,
                 'Loading staging run…',
-                stagingError,
-                <StagingPublishView
-                  onNavigate={handleNavigate}
-                  stagingRun={currentStagingRun}
-                  stagingRecords={stagingRecords}
-                  driftOnly={driftOnlyFilter}
-                  onToggleDriftOnly={setDriftOnlyFilter}
-                  publishRun={currentPublishRun}
-                  canCreateStaging={hasPermission('staging.create')}
-                  canPublish={hasPermission('publish.execute')}
-                  isActionPending={isStagingActionPending}
-                  actionError={stagingActionError}
-                  onCreateStagingRun={handleCreateStagingRun}
-                  onPublish={handlePublish}
-                  onAcknowledgeDrift={handleAcknowledgeDrift}
-                />
+                null,
+                <>
+                  <WorkflowBreadcrumb
+                    moduleLabel="Staging & Publish"
+                    itemLabel={stagingSelectedDatasetWorkspace?.name ?? selectedDatasetId ?? ''}
+                    onBack={() => navigate('/staging-publish')}
+                  />
+                  <StagingPublishView
+                    onNavigate={handleNavigate}
+                    selectedDataset={stagingSelectedDatasetWorkspace}
+                    approvedChanges={stagingApprovedChanges}
+                    previewColumns={stagingPreviewColumns}
+                    previewRows={stagingPreviewData.rows}
+                    previewLimitationNote={stagingPreviewData.limitationNote}
+                    tableStructureColumns={stagingTableStructureColumns}
+                    stagingDestination={PENDING_STAGING_DESTINATION}
+                    stagingRun={currentStagingRun}
+                    stagingRecords={stagingRecords}
+                    driftOnly={driftOnlyFilter}
+                    onToggleDriftOnly={setDriftOnlyFilter}
+                    publishRun={currentPublishRun}
+                    canCreateStaging={hasPermission('staging.create')}
+                    canPublish={hasPermission('publish.execute')}
+                    isActionPending={isStagingActionPending}
+                    actionError={stagingActionError}
+                    onCreateStagingRun={handleCreateStagingRun}
+                    onPublish={handlePublish}
+                    onAcknowledgeDrift={handleAcknowledgeDrift}
+                    revalidationByRecordId={revalidationByRecordId}
+                    revalidationLoadingIds={revalidationLoadingIds}
+                    revalidationErrorByRecordId={revalidationErrorByRecordId}
+                    onLoadRevalidation={handleLoadRevalidation}
+                    materializationPhase={materializationUiPhase}
+                    progressPercentage={currentStagingRun?.progress_percentage ?? null}
+                    copiedRowCount={currentStagingRun?.copied_row_count ?? null}
+                    materializationSourceRowCount={currentStagingRun?.source_row_count ?? null}
+                    materializedRowCount={currentStagingRun?.materialized_row_count ?? null}
+                    materializationError={currentStagingRun?.materialization_error ?? null}
+                    realDestinationLabel={realStagingDestination?.fullReference ?? null}
+                    isProgressOpen={isStagingProgressOpen}
+                    onCloseProgress={handleCloseStagingProgress}
+                    pollError={stagingPollError}
+                    onRetryPoll={handleRetryStagingPoll}
+                    isMaterializedPreviewOpen={isMaterializedPreviewOpen}
+                    onOpenMaterializedPreview={handleOpenMaterializedPreview}
+                    onCloseMaterializedPreview={() => setIsMaterializedPreviewOpen(false)}
+                    materializedDestination={materializedDestination}
+                    materializedDestinationLoading={materializedDestinationLoading}
+                    materializedDestinationError={materializedDestinationError}
+                    materializedPreviewColumns={materializedPreviewColumns}
+                    materializedPreviewRows={materializedPreviewRows}
+                    materializedPreviewTotalRows={materializedPreview?.total_rows ?? 0}
+                    materializedPreviewLimit={MATERIALIZED_PREVIEW_PAGE_SIZE}
+                    materializedPreviewOffset={materializedPreviewOffset}
+                    materializedPreviewLoading={materializedPreviewLoading}
+                    materializedPreviewError={materializedPreviewError}
+                    onRetryMaterializedPreview={handleRetryMaterializedPreview}
+                    materializedPreviewFilter={materializedPreviewFilter}
+                    onMaterializedPreviewFilterChange={handleMaterializedPreviewFilterChange}
+                    onMaterializedPreviewOffsetChange={handleMaterializedPreviewOffsetChange}
+                  />
+                </>
               )
             ))}
 
@@ -3360,6 +4879,22 @@ export default function App() {
               onUpdateProfile={handleUpdateProfile}
             />
           )}
+
+          {currentScreen === 'not-found' && (
+            <div className="p-10 max-w-xl mx-auto text-center space-y-4">
+              <h2 className="text-lg font-semibold text-on-surface">Page not found</h2>
+              <p className="text-sm text-on-surface-variant">
+                The page you're looking for doesn't exist or may have moved.
+              </p>
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-primary text-on-primary text-sm font-medium hover:opacity-90 transition-opacity cursor-pointer"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          )}
         </main>
       </div>
 
@@ -3448,17 +4983,13 @@ export default function App() {
                   <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                     Severity
                   </label>
-                  <select
+                  <Select
                     value={newRuleSeverity}
-                    onChange={(e) => setNewRuleSeverity(e.target.value)}
-                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
-                  >
-                    {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setNewRuleSeverity}
+                    options={['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => ({ value: s, label: s }))}
+                    aria-label="Severity"
+                    fullWidth
+                  />
                 </div>
               </div>
 
@@ -3519,6 +5050,94 @@ export default function App() {
         </div>
       )}
 
+      {/* Guided "no applicable rules" choice — shown instead of immediately
+          triggering validation when the selected dataset has zero enabled
+          RuleAssignments, so the user is never surprised by a silent 0-rules
+          "100% Passed" result. */}
+      {showNoRulesConfirm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-lg border border-outline-variant shadow-2xl max-w-md w-full p-6 space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 border-b border-surface-container pb-4">
+              <div className="w-10 h-10 rounded-md bg-secondary-fixed/40 text-on-secondary-fixed flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-2xl">warning</span>
+              </div>
+              <div>
+                <h3 className="font-editorial text-lg font-bold text-on-surface">No rules assigned yet</h3>
+                <p className="text-xs text-on-surface-variant mt-0.5">
+                  "{selectedDataset?.name ?? selectedDatasetId}" has no enabled rules. Running validation
+                  now would evaluate 0 rules — every row would trivially "pass" without anything actually
+                  being checked.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNoRulesConfirm(false);
+                  if (selectedDatasetId) void handleDetectRules(selectedDatasetId);
+                }}
+                className="w-full flex items-center gap-3 p-3 rounded-md border border-outline-variant hover:bg-surface-container-low transition-colors text-left cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-primary">auto_awesome</span>
+                <div>
+                  <p className="text-xs font-semibold text-on-surface">Analyze &amp; Suggest Rules</p>
+                  <p className="text-[11px] text-outline">Run AI/pattern detection on this dataset's schema and data.</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  setShowNoRulesConfirm(false);
+                  if (!selectedDatasetId) return;
+                  setAssignmentDatasetId(selectedDatasetId);
+                  try {
+                    setAssignmentDatasetColumns(await listDatasetColumns(selectedDatasetId));
+                  } catch {
+                    setAssignmentDatasetColumns([]);
+                  }
+                  setShowAssignmentForm(true);
+                }}
+                className="w-full flex items-center gap-3 p-3 rounded-md border border-outline-variant hover:bg-surface-container-low transition-colors text-left cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-primary">playlist_add_check</span>
+                <div>
+                  <p className="text-xs font-semibold text-on-surface">Assign Existing Rules</p>
+                  <p className="text-[11px] text-outline">Attach an already-defined rule to this dataset.</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNoRulesConfirm(false);
+                  void executeRunValidation();
+                }}
+                className="w-full flex items-center gap-3 p-3 rounded-md border border-outline-variant hover:bg-surface-container-low transition-colors text-left cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-outline">play_circle</span>
+                <div>
+                  <p className="text-xs font-semibold text-on-surface">Run Anyway</p>
+                  <p className="text-[11px] text-outline">Validate with 0 rules — the result will clearly show that.</p>
+                </div>
+              </button>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowNoRulesConfirm(false)}
+                className="px-4 py-2 rounded-md text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Assign Rule to Dataset Modal (rule_assignments.manage-gated) */}
       {showAssignmentForm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-200">
@@ -3543,47 +5162,39 @@ export default function App() {
 
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">Rule</label>
-                <select
+                <Select
                   value={assignmentRuleId}
-                  onChange={(e) => setAssignmentRuleId(e.target.value)}
-                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
-                >
-                  <option value="">Select a rule…</option>
-                  {rules.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setAssignmentRuleId}
+                  options={rules.map((r) => ({ value: r.id, label: r.name }))}
+                  placeholder="Select a rule…"
+                  aria-label="Rule"
+                  fullWidth
+                />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                   Dataset
                 </label>
-                <select
+                <Select
                   value={assignmentDatasetId}
-                  onChange={async (e) => {
-                    setAssignmentDatasetId(e.target.value);
+                  onChange={async (v) => {
+                    setAssignmentDatasetId(v);
                     setAssignmentColumnId('');
                     setAssignmentColumnIds([]);
-                    if (e.target.value) {
+                    if (v) {
                       try {
-                        setAssignmentDatasetColumns(await listDatasetColumns(e.target.value));
+                        setAssignmentDatasetColumns(await listDatasetColumns(v));
                       } catch {
                         setAssignmentDatasetColumns([]);
                       }
                     }
                   }}
-                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
-                >
-                  <option value="">Select a dataset…</option>
-                  {assignmentDatasetOptions.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
+                  options={assignmentDatasetOptions.map((d) => ({ value: d.id, label: d.name }))}
+                  placeholder="Select a dataset…"
+                  aria-label="Dataset"
+                  fullWidth
+                />
               </div>
 
               <div>
@@ -3611,18 +5222,14 @@ export default function App() {
                   <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                     Column
                   </label>
-                  <select
+                  <Select
                     value={assignmentColumnId}
-                    onChange={(e) => setAssignmentColumnId(e.target.value)}
-                    className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
-                  >
-                    <option value="">Select a column…</option>
-                    {assignmentDatasetColumns.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setAssignmentColumnId}
+                    options={assignmentDatasetColumns.map((c) => ({ value: c.id, label: c.name }))}
+                    placeholder="Select a column…"
+                    aria-label="Column"
+                    fullWidth
+                  />
                 </div>
               )}
 
@@ -3631,6 +5238,11 @@ export default function App() {
                   <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                     Columns (select at least 2)
                   </label>
+                  {/* Intentionally left as a native multi-select: it depends on
+                      real OS/browser multi-select behavior (ctrl/shift-click,
+                      the `size` attribute rendering it as an open list box)
+                      that the standardized single-select Select component
+                      above doesn't attempt to replicate. */}
                   <select
                     multiple
                     value={assignmentColumnIds}
@@ -3708,17 +5320,13 @@ export default function App() {
                 <label className="block text-xs font-semibold text-on-surface mb-1 uppercase tracking-wider">
                   Severity
                 </label>
-                <select
+                <Select
                   value={versionSeverity}
-                  onChange={(e) => setVersionSeverity(e.target.value)}
-                  className="w-full bg-surface-container-low border border-outline-variant rounded-md px-3.5 py-2 text-xs text-on-surface focus:outline-none focus:bg-white focus:border-primary"
-                >
-                  {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setVersionSeverity}
+                  options={['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((s) => ({ value: s, label: s }))}
+                  aria-label="Severity"
+                  fullWidth
+                />
               </div>
 
               <div>
@@ -3886,12 +5494,26 @@ export default function App() {
       )}
 
       {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-primary text-white px-5 py-3 rounded-lg shadow-xl border border-primary-container text-xs font-semibold flex items-center gap-2.5 animate-in slide-in-from-bottom-5 duration-200">
-          <span className="material-symbols-outlined text-base text-on-primary-container">
-            info
-          </span>
-          <span>{toastMessage}</span>
+      {toast && (
+        <div
+          role={toast.variant === 'error' ? 'alert' : 'status'}
+          aria-live={toast.variant === 'error' ? 'assertive' : 'polite'}
+          className={`fixed bottom-6 right-6 z-50 px-5 py-3 rounded-lg shadow-xl border text-xs font-semibold flex items-center gap-2.5 animate-in slide-in-from-bottom-5 duration-200 ${TOAST_STYLES[toast.variant]}`}
+        >
+          <span className="material-symbols-outlined text-base shrink-0">{TOAST_ICON[toast.variant]}</span>
+          <span>{toast.message}</span>
+          {toast.action && (
+            <button
+              type="button"
+              onClick={() => {
+                toast.action!.onClick();
+                setToast(null);
+              }}
+              className="ml-1 shrink-0 underline underline-offset-2 hover:no-underline cursor-pointer font-bold"
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
     </div>

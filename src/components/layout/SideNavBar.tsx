@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavScreen } from '../../types';
+import { APP_VERSION } from '../../version';
 
 interface SideNavBarProps {
   currentScreen: NavScreen;
@@ -14,7 +15,7 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
   isMobileOpen = false,
   onCloseMobile,
 }) => {
-  const navItems = [
+  const navItems: Array<{ id: NavScreen; label: string; icon: string; isActive?: boolean; hidden?: boolean }> = [
     {
       id: 'dashboard' as NavScreen,
       label: 'Dashboard',
@@ -22,7 +23,7 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
     },
     {
       id: 'data-sources' as NavScreen,
-      label: 'Data',
+      label: 'Data Sources',
       icon: 'database',
       isActive: currentScreen === 'data-sources',
     },
@@ -73,7 +74,9 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
     },
     {
       id: 'staging-publish' as NavScreen,
-      label: 'Staging & Publish',
+      // V1.0 ends at Staging — Publishing isn't enabled yet (see Phase 4.12B's
+      // publish-safety messaging on the Staging detail page itself).
+      label: 'Staging',
       icon: 'cloud_upload',
       isActive: currentScreen === 'staging-publish',
     },
@@ -82,6 +85,10 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
       label: 'Data Lineage',
       icon: 'hub',
       isActive: currentScreen === 'data-lineage',
+      // Hidden from the sidebar (same treatment as Reports/AI Insights below) —
+      // the screen, its /data-lineage route, and its data/business logic all
+      // stay intact; this only removes it from the visible nav list.
+      hidden: true,
     },
     {
       id: 'run-history' as NavScreen,
@@ -94,14 +101,19 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
       label: 'Reports',
       icon: 'monitoring',
       isActive: currentScreen === 'reports',
+      // Temporarily hidden (dataset-centric redesign phase) — the screen, route, and
+      // all of its data/business logic stay intact; this only removes it from the
+      // visible nav list below. Re-enable by dropping `hidden`.
+      hidden: true,
     },
     {
       id: 'insights' as NavScreen,
       label: 'AI Insights',
       icon: 'auto_awesome',
       isActive: currentScreen === 'insights',
+      hidden: true,
     },
-  ];
+  ].filter((item) => !item.hidden);
 
   return (
     <>
@@ -140,8 +152,11 @@ export const SideNavBar: React.FC<SideNavBarProps> = ({
                 <h1 className="font-editorial text-2xl font-bold tracking-tight text-on-deep-navy">
                   DataCraft
                 </h1>
-                <p className="text-[9px] text-on-deep-navy-variant uppercase tracking-widest font-semibold">
+                <p className="text-[9px] text-on-deep-navy-variant uppercase tracking-widest font-semibold flex items-center gap-1.5">
                   Enterprise Intelligence
+                  <span className="text-on-deep-navy-variant/60 normal-case tracking-normal font-medium">
+                    {APP_VERSION}
+                  </span>
                 </p>
               </div>
             </div>

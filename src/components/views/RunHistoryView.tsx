@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { NavScreen, RunHistoryItem } from '../../types';
+import { Select } from '../ui/Select';
 
 interface RunHistoryViewProps {
   onNavigate: (screen: NavScreen) => void;
@@ -84,18 +85,13 @@ export const RunHistoryView: React.FC<RunHistoryViewProps> = ({ onNavigate, runH
             ))}
           </div>
 
-          <select
+          <Select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-surface-container-low border border-outline-variant rounded-md px-3 py-2 text-xs font-semibold text-on-surface focus:outline-none focus:border-primary cursor-pointer"
-          >
-            <option value="ALL">All Statuses</option>
-            {statusOptions.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+            onChange={setStatusFilter}
+            options={[{ value: 'ALL', label: 'All Statuses' }, ...statusOptions.map((s) => ({ value: s, label: s }))]}
+            aria-label="Filter by status"
+            size="sm"
+          />
         </div>
 
         <div className="relative w-full lg:w-72">
