@@ -73,6 +73,8 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ReviewCorrecti
     onBulkAccept: vi.fn(),
     onBulkReject: vi.fn(),
     onSubmitForApproval: vi.fn(),
+    selectedReviewApprovalStatus: null,
+    canViewStaging: true,
     aiTraceBySuggestionId: new Map<string, AITraceResponse>(),
     aiTraceLoadingIds: new Set<string>(),
     aiTraceErrorBySuggestionId: new Map<string, string>(),
@@ -359,5 +361,90 @@ describe('ReviewCorrectionsView — live-acceptance fix', () => {
     render(<ReviewCorrectionsView {...baseProps({ issues: [liveIssue] })} />);
     expect(screen.queryByText(/STRING_TEMPLATE/)).not.toBeInTheDocument();
     expect(screen.getByText(/String Template strategy identified/)).toBeInTheDocument();
+  });
+});
+
+// V1.0 acceptance fix — the read-only banner for a READY_FOR_APPROVAL review
+// must consult the linked ApprovalRequest's real status, never assume
+// "submitted" always means "still awaiting sign-off". ReviewRun.status stays
+// READY_FOR_APPROVAL forever once submitted (by design), so this is the only
+// signal that can tell "pending" from "approved" from "rejected" apart.
+const READY_FOR_APPROVAL_RUN: ReviewRun = { ...REVIEW_RUN, status: 'READY_FOR_APPROVAL' };
+
+describe('ReviewCorrectionsView — approval-aware read-only banner', () => {
+  it('shows the awaiting-sign-off copy while the approval is still PENDING', () => {
+    render(
+      <ReviewCorrectionsView
+        {...baseProps({ reviewRuns: [READY_FOR_APPROVAL_RUN], selectedReviewApprovalStatus: 'PENDING' })}
+      />
+    );
+    expect(screen.getByText(/awaiting sign-off in the Approval Center/)).toBeInTheDocument();
+    expect(screen.queryByText('Approval completed')).not.toBeInTheDocument();
+  });
+
+  it('shows the awaiting-sign-off copy when no approval request is known yet (null)', () => {
+    render(
+      <ReviewCorrectionsView
+        {...baseProps({ reviewRuns: [READY_FOR_APPROVAL_RUN], selectedReviewApprovalStatus: null })}
+      />
+    );
+    expect(screen.getByText(/awaiting sign-off in the Approval Center/)).toBeInTheDocument();
+  });
+
+  it('shows "Approval completed" and a Go to Staging CTA once APPROVED', async () => {
+    const user = userEvent.setup();
+    const props = baseProps({
+      reviewRuns: [READY_FOR_APPROVAL_RUN],
+      selectedReviewApprovalStatus: 'APPROVED',
+      canViewStaging: true,
+    });
+    render(<ReviewCorrectionsView {...props} />);
+
+    expect(screen.getByText('Approval completed')).toBeInTheDocument();
+    expect(screen.getByText('This review has been approved and is ready for staging.')).toBeInTheDocument();
+    expect(screen.queryByText(/awaiting sign-off/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Go to Staging/ }));
+    expect(props.onNavigate).toHaveBeenCalledWith('staging-publish');
+  });
+
+  it('hides the Go to Staging CTA when the user lacks staging.read', () => {
+    render(
+      <ReviewCorrectionsView
+        {...baseProps({
+          reviewRuns: [READY_FOR_APPROVAL_RUN],
+          selectedReviewApprovalStatus: 'APPROVED',
+          canViewStaging: false,
+        })}
+      />
+    );
+    expect(screen.getByText('Approval completed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Go to Staging/ })).not.toBeInTheDocument();
+  });
+
+  it('shows the rejected copy when the approval was REJECTED', () => {
+    render(
+      <ReviewCorrectionsView
+        {...baseProps({ reviewRuns: [READY_FOR_APPROVAL_RUN], selectedReviewApprovalStatus: 'REJECTED' })}
+      />
+    );
+    expect(screen.getByText('Approval rejected')).toBeInTheDocument();
+    expect(screen.queryByText('Approval completed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/awaiting sign-off/)).not.toBeInTheDocument();
+  });
+
+  it('shows the partially-approved copy for PARTIALLY_APPROVED', () => {
+    render(
+      <ReviewCorrectionsView
+        {...baseProps({ reviewRuns: [READY_FOR_APPROVAL_RUN], selectedReviewApprovalStatus: 'PARTIALLY_APPROVED' })}
+      />
+    );
+    expect(screen.getByText('Partially approved')).toBeInTheDocument();
+  });
+
+  it('never mutates ReviewRun.status to show the approved banner — the run stays READY_FOR_APPROVAL', () => {
+    const props = baseProps({ reviewRuns: [READY_FOR_APPROVAL_RUN], selectedReviewApprovalStatus: 'APPROVED' });
+    render(<ReviewCorrectionsView {...props} />);
+    expect(props.reviewRuns[0].status).toBe('READY_FOR_APPROVAL');
   });
 });

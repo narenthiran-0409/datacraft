@@ -31,6 +31,14 @@ interface ReviewCorrectionsViewProps {
   onBulkAccept: (issueIds: string[]) => void;
   onBulkReject: (issueIds: string[]) => void;
   onSubmitForApproval: (reviewRunId: string) => void;
+  // V1.0 acceptance fix — the linked/latest ApprovalRequest's status for the
+  // selected review, if any. ReviewRun.status alone stays at
+  // READY_FOR_APPROVAL forever once submitted (by design — approval truth
+  // lives only on ApprovalRequest, never mirrored back), so the read-only
+  // banner must consult this separately or it keeps saying "awaiting
+  // sign-off" long after the approval has actually been decided.
+  selectedReviewApprovalStatus: 'PENDING' | 'PARTIALLY_APPROVED' | 'APPROVED' | 'REJECTED' | null;
+  canViewStaging: boolean;
   // Phase 4.10 — AI Details (AI Trace), lazy-loaded per suggestion id only
   // when a user opens that section for a given issue.
   aiTraceBySuggestionId: Map<string, AITraceResponse>;
@@ -184,6 +192,8 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
   onBulkAccept,
   onBulkReject,
   onSubmitForApproval,
+  selectedReviewApprovalStatus,
+  canViewStaging,
   aiTraceBySuggestionId,
   aiTraceLoadingIds,
   aiTraceErrorBySuggestionId,
@@ -906,23 +916,79 @@ export const ReviewCorrectionsView: React.FC<ReviewCorrectionsViewProps> = ({
         </>
       ) : (
         <div className="bg-surface-container-low rounded-lg border border-outline-variant p-6 flex items-start gap-3">
-          <span className="material-symbols-outlined text-primary text-xl mt-0.5">info</span>
+          <span className="material-symbols-outlined text-primary text-xl mt-0.5">
+            {/* V1.0 acceptance fix — the linked ApprovalRequest's real
+                decision, not ReviewRun.status alone (which stays at
+                READY_FOR_APPROVAL forever once submitted, by design — see
+                selectedReviewApprovalStatus's own prop comment). */}
+            {selectedRun.status === 'READY_FOR_APPROVAL' && selectedReviewApprovalStatus === 'APPROVED'
+              ? 'check_circle'
+              : selectedRun.status === 'READY_FOR_APPROVAL' && selectedReviewApprovalStatus === 'REJECTED'
+              ? 'cancel'
+              : 'info'}
+          </span>
           <div>
-            <p className="text-sm font-bold text-on-surface">
-              This run is {STATUS_LABEL[selectedRun.status].toLowerCase()} and is read-only here.
-            </p>
-            <p className="text-xs text-on-surface-variant mt-1">
-              {selectedRun.status === 'READY_FOR_APPROVAL'
-                ? 'It has been submitted and is now awaiting sign-off in the Approval Center.'
-                : 'Decided issues from this run are kept for reference.'}
-            </p>
-            {selectedRun.status === 'READY_FOR_APPROVAL' && (
-              <button
-                onClick={() => onNavigate('approval-center')}
-                className="mt-3 text-xs font-semibold text-primary hover:underline cursor-pointer"
-              >
-                Go to Approval Center &rarr;
-              </button>
+            {selectedRun.status === 'READY_FOR_APPROVAL' && selectedReviewApprovalStatus === 'APPROVED' ? (
+              <>
+                <p className="text-sm font-bold text-on-surface">Approval completed</p>
+                <p className="text-xs text-on-surface-variant mt-1">
+                  This review has been approved and is ready for staging.
+                </p>
+                {canViewStaging && (
+                  <button
+                    onClick={() => onNavigate('staging-publish')}
+                    className="mt-3 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                  >
+                    Go to Staging &rarr;
+                  </button>
+                )}
+              </>
+            ) : selectedRun.status === 'READY_FOR_APPROVAL' && selectedReviewApprovalStatus === 'PARTIALLY_APPROVED' ? (
+              <>
+                <p className="text-sm font-bold text-on-surface">Partially approved</p>
+                <p className="text-xs text-on-surface-variant mt-1">
+                  Some issues in this run have been approved; the rest are still awaiting sign-off in the Approval
+                  Center.
+                </p>
+                <button
+                  onClick={() => onNavigate('approval-center')}
+                  className="mt-3 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                >
+                  Go to Approval Center &rarr;
+                </button>
+              </>
+            ) : selectedRun.status === 'READY_FOR_APPROVAL' && selectedReviewApprovalStatus === 'REJECTED' ? (
+              <>
+                <p className="text-sm font-bold text-on-surface">Approval rejected</p>
+                <p className="text-xs text-on-surface-variant mt-1">
+                  This run's approval request was rejected. See the Approval Center for the reviewer's comment.
+                </p>
+                <button
+                  onClick={() => onNavigate('approval-center')}
+                  className="mt-3 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                >
+                  View in Approval Center &rarr;
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-bold text-on-surface">
+                  This run is {STATUS_LABEL[selectedRun.status].toLowerCase()} and is read-only here.
+                </p>
+                <p className="text-xs text-on-surface-variant mt-1">
+                  {selectedRun.status === 'READY_FOR_APPROVAL'
+                    ? 'It has been submitted and is now awaiting sign-off in the Approval Center.'
+                    : 'Decided issues from this run are kept for reference.'}
+                </p>
+                {selectedRun.status === 'READY_FOR_APPROVAL' && (
+                  <button
+                    onClick={() => onNavigate('approval-center')}
+                    className="mt-3 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                  >
+                    Go to Approval Center &rarr;
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>

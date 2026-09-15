@@ -114,6 +114,7 @@ import {
   getReview,
   listReviewIssues,
   listReviewSuggestions,
+  listReviewCorrections,
   generateReviewSuggestions as apiGenerateReviewSuggestions,
   bulkReviewAction as apiBulkReviewAction,
   acceptSuggestion as apiAcceptSuggestion,
@@ -123,6 +124,7 @@ import {
   ReviewRunResponse,
   IssueResponse,
   CorrectionSuggestionResponse,
+  CorrectionResponse,
   getSuggestionAiTrace,
   AITraceResponse,
   // Approval
@@ -134,6 +136,8 @@ import {
   // Staging
   createStagingRun as apiCreateStagingRun,
   getStagingRun,
+  getStagingCandidates,
+  StagingCandidateResponse,
   listStagingRecords,
   getStagingRecordRevalidation,
   getStagingDestination,
@@ -833,6 +837,18 @@ export default function App() {
   const [workflowCatalogDatasets, setWorkflowCatalogDatasets] = useState<DatasetResponse[]>([]);
   const [workflowCatalogLoading, setWorkflowCatalogLoading] = useState(false);
   const [workflowCatalogError, setWorkflowCatalogError] = useState<string | null>(null);
+
+  // V1.0 acceptance fix — backend-authoritative staging readiness
+  // (GET /api/v1/staging-candidates). Keyed by dataset_id below for
+  // computeStagingDatasetStatus's lookup. This REPLACES client-side
+  // eligibility derivation for the approved-and-beyond states (never
+  // review.status === 'APPROVED', which cannot exist); pre-approval states
+  // (Draft/In Review/Ready for Approval) still come from reviewRuns +
+  // approvalQueue below, which the candidates endpoint deliberately
+  // doesn't cover (it only enumerates staging-relevant reviews).
+  const [stagingCandidates, setStagingCandidates] = useState<StagingCandidateResponse[]>([]);
+  const [stagingCandidatesLoading, setStagingCandidatesLoading] = useState(false);
+  const [stagingCandidatesError, setStagingCandidatesError] = useState<string | null>(null);
 
   // Master/detail redesign — each of the five workflow screens (Validation,
   // Data Quality Rules, Review & Corrections, Approval Center, Staging &
@@ -1908,13 +1924,14 @@ export default function App() {
 
       const details = await Promise.all(
         reviewsList.map(async (rr) => {
-          const [vr, issuesList, suggestionsList] = await Promise.all([
+          const [vr, issuesList, suggestionsList, correctionsList] = await Promise.all([
             getValidationRun(rr.validation_run_id).catch(() => null),
             listReviewIssues(rr.id).catch(() => [] as IssueResponse[]),
             listReviewSuggestions(rr.id).catch(() => [] as CorrectionSuggestionResponse[]),
+            listReviewCorrections(rr.id).catch(() => [] as CorrectionResponse[]),
           ]);
           const datasetName = vr ? datasetNameById.get(vr.dataset_id) ?? vr.dataset_id : rr.validation_run_id;
-          return { rr, datasetName, datasetId: vr?.dataset_id, issuesList, suggestionsList };
+          return { rr, datasetName, datasetId: vr?.dataset_id, issuesList, suggestionsList, correctionsList };
         })
       );
 
@@ -1937,16 +1954,25 @@ export default function App() {
 
       const mappedRuns: ReviewRun[] = [];
       const mappedIssues: Issue[] = [];
-      details.forEach(({ rr, datasetName, datasetId, issuesList, suggestionsList }) => {
+      details.forEach(({ rr, datasetName, datasetId, issuesList, suggestionsList, correctionsList }) => {
         const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
         suggestionsList.forEach((s) => {
           suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
         });
+        // BUG FIX (V1.0 acceptance): finalValue used to be hardcoded null here
+        // (no bulk endpoint existed to learn each issue's decided correction),
+        // which silently zeroed out every dataset's resolved-issue count
+        // everywhere it's used — including the Staging page's Ready to Stage
+        // derivation. GET /reviews/{id}/corrections now supplies the real,
+        // decided value per issue (one Correction row per issue, by design).
+        const correctionByIssueId = new Map<string, CorrectionResponse>();
+        correctionsList.forEach((c) => correctionByIssueId.set(c.issue_id, c));
 
         const mapped: Issue[] = issuesList.map((issue) => {
           const candidates = suggestionsByIssueId.get(issue.id) ?? [];
           const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
           const failure = failureById.get(issue.validation_failure_id);
+          const correction = correctionByIssueId.get(issue.id);
           return {
             id: issue.id,
             reviewRunId: issue.review_run_id,
@@ -1966,7 +1992,7 @@ export default function App() {
             // string on the wire — parsed here rather than passed through.
             confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
             status: (issue.status as Issue['status']) || 'PENDING',
-            finalValue: null,
+            finalValue: correction?.final_value ?? null,
             ruleTriggered: failure ? failure.rule_name : '—',
             suggestionId: suggestion?.id ?? null,
             suggestionStrategy: suggestion?.strategy ?? null,
@@ -2061,6 +2087,35 @@ export default function App() {
       })
       .finally(() => {
         if (!cancelled) setApprovalsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentUser?.id]);
+
+  // V1.0 acceptance fix — backend-authoritative staging readiness. Fetched
+  // whenever Staging & Publish is open (refresh-safe: this is a plain GET
+  // keyed off nothing but the current user's permissions, unlike reviewRuns/
+  // approvalQueue above it never depends on a prior screen visit or any
+  // client-side join to become correct).
+  useEffect(() => {
+    if (currentScreen !== 'staging-publish') return;
+    if (!hasPermission('staging.read')) return;
+
+    let cancelled = false;
+    setStagingCandidatesLoading(true);
+    setStagingCandidatesError(null);
+    getStagingCandidates()
+      .then((rows) => {
+        if (!cancelled) setStagingCandidates(rows);
+      })
+      .catch((err) => {
+        if (!cancelled) setStagingCandidatesError(extractErrorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setStagingCandidatesLoading(false);
       });
 
     return () => {
@@ -2945,15 +3000,19 @@ export default function App() {
     setReviewActionError(null);
     try {
       const result = await apiGenerateReviewSuggestions(reviewRunId);
-      const [issuesList, suggestionsList, reviewDetail] = await Promise.all([
+      const [issuesList, suggestionsList, correctionsList, reviewDetail] = await Promise.all([
         listReviewIssues(reviewRunId),
         listReviewSuggestions(reviewRunId),
+        listReviewCorrections(reviewRunId).catch(() => [] as CorrectionResponse[]),
         getReview(reviewRunId).catch(() => null),
       ]);
       const suggestionsByIssueId = new Map<string, CorrectionSuggestionResponse[]>();
       suggestionsList.forEach((s) => {
         suggestionsByIssueId.set(s.issue_id, [...(suggestionsByIssueId.get(s.issue_id) ?? []), s]);
       });
+      // Same finalValue fix as the initial load — see that effect's comment.
+      const correctionByIssueId = new Map<string, CorrectionResponse>();
+      correctionsList.forEach((c) => correctionByIssueId.set(c.issue_id, c));
       // Same real column/rule name resolution as the initial load (see the
       // review-corrections effect's comment) — without this, re-fetching after
       // generating suggestions would regress this review's issues back to
@@ -2969,6 +3028,7 @@ export default function App() {
         const candidates = suggestionsByIssueId.get(issue.id) ?? [];
         const suggestion = candidates.find((s) => s.is_selected) ?? candidates[0];
         const failure = failureById.get(issue.validation_failure_id);
+        const correction = correctionByIssueId.get(issue.id);
         return {
           id: issue.id,
           reviewRunId: issue.review_run_id,
@@ -2984,7 +3044,7 @@ export default function App() {
           // Decimal-as-string on the wire.
           confidence: suggestion?.confidence !== undefined ? Number(suggestion.confidence) : null,
           status: (issue.status as Issue['status']) || 'PENDING',
-          finalValue: null,
+          finalValue: correction?.final_value ?? null,
           ruleTriggered: failure ? failure.rule_name : '—',
           suggestionId: suggestion?.id ?? null,
           suggestionStrategy: suggestion?.strategy ?? null,
@@ -3937,25 +3997,46 @@ export default function App() {
     [workflowCatalogDatasets, workflowCatalogSchemas, workflowCatalogConnections, schemaConnectionId, reviewRuns, approvalQueue]
   );
 
-  // Staging/publish run status is only ever real for the dataset currently open
-  // in the workspace (see deriveDatasetStagingStatus's own doc comment). The
-  // review consulted is the dataset's real staging-eligible review (see
-  // getStagingEligibleReview's own doc comment for why this is deliberately
-  // NOT just "the latest review") — falling back to the dataset's current
-  // (in-progress, not-yet-approved) review only for the pre-approval statuses.
+  // V1.0 acceptance fix — maps a backend StagingCandidateResponse.readiness
+  // straight onto the existing DatasetStagingStatus enum. Backend-computed
+  // via StagingService.check_staging_eligibility (the exact rules
+  // POST /reviews/{id}/staging itself enforces), never re-derived here.
+  const STAGING_READINESS_TO_STATUS: Record<StagingCandidateResponse['readiness'], DatasetStagingStatus> = {
+    READY_TO_STAGE: 'READY_TO_STAGE',
+    BUILDING: 'STAGING',
+    STAGED: 'STAGED',
+    FAILED: 'FAILED',
+    NOT_READY: 'NO_APPROVED_CHANGES',
+  };
+
+  // Staging readiness for an approved-or-beyond dataset now comes from the
+  // backend-authoritative /staging-candidates list (see the fetch effect
+  // above), never a client-side re-derivation of "is this approved" —
+  // review.status can never equal 'APPROVED' (approval truth lives only on
+  // ApprovalRequest), and only the backend actually knows every real
+  // trigger() precondition (scope size limits, BUILDING conflicts, dataset
+  // resolvability). A dataset with no candidate entry has never had an
+  // APPROVED request and no staging run — those pre-approval statuses
+  // (Draft/In Review/Ready for Approval) are outside the candidates
+  // endpoint's scope by design and still come from reviewRuns/approvalQueue.
   const computeStagingDatasetStatus = (datasetId: string): DatasetStagingStatus => {
-    const eligibleReview = getStagingEligibleReview(reviewRuns, approvalQueue, datasetId);
-    if (eligibleReview) {
-      const approval = getApprovalForReview(approvalQueue, eligibleReview.id);
-      const resolvedCount = resolvedIssuesByReviewId.get(eligibleReview.id)?.length ?? 0;
-      return deriveDatasetStagingStatus({
-        reviewStatus: eligibleReview.status,
-        resolvedIssues: resolvedCount,
-        approvalStatus: approval?.status,
-        stagingRunStatus: datasetId === selectedDatasetId ? currentStagingRun?.status ?? null : null,
-        publishRunStatus: datasetId === selectedDatasetId ? currentPublishRun?.status ?? null : null,
-        materializationPhase: datasetId === selectedDatasetId ? currentStagingRun?.materialization_phase ?? null : null,
-      });
+    const candidate = stagingCandidates.find((c) => c.dataset_id === datasetId);
+    if (candidate) {
+      // Live, this-session polling for the dataset currently open in the
+      // workspace is more granular (exact materialization phase) than the
+      // candidates snapshot fetched once on page load — prefer it while a
+      // staging run is actually in flight right now.
+      if (datasetId === selectedDatasetId && currentStagingRun) {
+        return deriveDatasetStagingStatus({
+          reviewStatus: undefined,
+          resolvedIssues: candidate.affected_record_count,
+          approvalStatus: candidate.approval_status as ApprovalRequestItem['status'],
+          stagingRunStatus: currentStagingRun.status,
+          publishRunStatus: currentPublishRun?.status ?? null,
+          materializationPhase: currentStagingRun.materialization_phase ?? null,
+        });
+      }
+      return STAGING_READINESS_TO_STATUS[candidate.readiness];
     }
     const currentReview = getCurrentReviewForDataset(reviewRuns, datasetId);
     const approval = currentReview ? getApprovalForReview(approvalQueue, currentReview.id) : null;
@@ -3974,6 +4055,7 @@ export default function App() {
         const connId = schemaConnectionId.get(d.schema_id);
         const schema = workflowCatalogSchemas.find((s) => s.id === d.schema_id);
         const connection = workflowCatalogConnections.find((c) => c.id === connId);
+        const candidate = stagingCandidates.find((c) => c.dataset_id === d.id);
         const eligibleReview = getStagingEligibleReview(reviewRuns, approvalQueue, d.id);
         const approvedIssues = eligibleReview ? resolvedIssuesByReviewId.get(eligibleReview.id) ?? [] : [];
         return {
@@ -3981,8 +4063,11 @@ export default function App() {
           datasetName: d.name,
           connectionName: connection?.name ?? 'Unknown connection',
           schemaName: schema?.name ?? 'unknown_schema',
-          approvedChangesCount: approvedIssues.length,
-          rowsAffected: new Set(approvedIssues.map((i) => i.recordRef)).size,
+          // Backend-authoritative counts when a candidate exists (real
+          // ApprovalRequest.affected_issue_count/affected_record_count);
+          // client-derived fallback only for a not-yet-approved dataset.
+          approvedChangesCount: candidate?.affected_issue_count ?? approvedIssues.length,
+          rowsAffected: candidate?.affected_record_count ?? new Set(approvedIssues.map((i) => i.recordRef)).size,
           status: computeStagingDatasetStatus(d.id),
           lastStagedLabel:
             d.id === selectedDatasetId && currentStagingRun
@@ -3999,6 +4084,7 @@ export default function App() {
       reviewRuns,
       approvalQueue,
       resolvedIssuesByReviewId,
+      stagingCandidates,
       selectedDatasetId,
       currentStagingRun,
     ]
@@ -4628,6 +4714,12 @@ export default function App() {
                     onBulkAccept={handleBulkAccept}
                     onBulkReject={handleBulkReject}
                     onSubmitForApproval={handleSubmitForApproval}
+                    selectedReviewApprovalStatus={
+                      (selectedReviewId
+                        ? getApprovalForReview(approvalQueue, selectedReviewId)?.status
+                        : null) ?? null
+                    }
+                    canViewStaging={hasPermission('staging.read')}
                     aiTraceBySuggestionId={aiTraceBySuggestionId}
                     aiTraceLoadingIds={aiTraceLoadingIds}
                     aiTraceErrorBySuggestionId={aiTraceErrorBySuggestionId}

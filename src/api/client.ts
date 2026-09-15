@@ -1084,6 +1084,14 @@ export function listReviewSuggestions(reviewId: string): Promise<CorrectionSugge
   return apiRequest(`/reviews/${reviewId}/suggestions`);
 }
 
+// V1.0 acceptance fix — the only prior source of a Correction's final_value
+// was a single-issue action response (accept/edit/reject/correct), so
+// there was no bulk way to learn every issue's decided value on initial
+// load. This is what Issue.finalValue below is actually populated from now.
+export function listReviewCorrections(reviewId: string): Promise<CorrectionResponse[]> {
+  return apiRequest(`/reviews/${reviewId}/corrections`);
+}
+
 export function generateReviewSuggestions(reviewId: string): Promise<GenerateSuggestionsResponse> {
   return apiRequest(`/reviews/${reviewId}/generate-suggestions`, { method: 'POST' });
 }
@@ -1282,6 +1290,37 @@ export function createStagingRun(reviewId: string): Promise<StagingRunResponse> 
 
 export function getStagingRun(stagingRunId: string): Promise<StagingRunResponse> {
   return apiRequest(`/staging-runs/${stagingRunId}`);
+}
+
+// V1.0 acceptance fix — backend-authoritative "is this review ready to
+// stage" (app/modules/staging/schemas.py StagingCandidateResponse). Reuses
+// the exact same eligibility rules POST /reviews/{id}/staging itself
+// enforces (StagingService.check_staging_eligibility), so this list and
+// what triggering staging actually accepts cannot disagree. `readiness` is
+// one of READY_TO_STAGE | BUILDING | STAGED | FAILED | NOT_READY — never
+// derive this client-side from review.status (APPROVED is not a legal
+// ReviewRun status; approval truth lives only on ApprovalRequest).
+export interface StagingCandidateResponse {
+  review_run_id: string;
+  validation_run_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  connection_id: string | null;
+  connection_name: string | null;
+  approval_request_id: string;
+  approval_status: string;
+  affected_issue_count: number;
+  affected_record_count: number;
+  approval_decided_at: string | null;
+  staging_run_id: string | null;
+  staging_status: string | null;
+  staging_attempt_number: number | null;
+  readiness: 'READY_TO_STAGE' | 'BUILDING' | 'STAGED' | 'FAILED' | 'NOT_READY';
+  not_ready_reason: string | null;
+}
+
+export function getStagingCandidates(): Promise<StagingCandidateResponse[]> {
+  return apiRequest('/staging-candidates');
 }
 
 export function listStagingRecords(
